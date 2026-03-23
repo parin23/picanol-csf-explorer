@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Picanol Loom — Event Viewer</title>
+<title>Picanol Loom — Event Viewer (Newest First)</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;600;700;900&family=Barlow:wght@300;400;500&family=Share+Tech+Mono&display=swap');
 
@@ -421,7 +421,7 @@
   <div class="logo">Picanol <span>/</span> Loom Log Viewer</div>
   <div class="header-meta" id="header-meta">
     <strong>Machine:</strong> LOOM-19 &nbsp;·&nbsp;
-    <span class="status-dot"></span><strong>Log loaded</strong>
+    <span class="status-dot"></span><strong>Log loaded (newest first)</strong>
   </div>
 </header>
 
@@ -490,7 +490,7 @@
     <div class="empty-state" id="empty-state">
       <div class="big-icon">🏭</div>
       <h2>No Log Loaded</h2>
-      <p>Upload a Picanol loom log file (<code style="color:var(--amber)">commserver_*.txt</code>) using the panel on the left to see a clean, human-readable timeline of everything that happened on the loom floor.</p>
+      <p>Upload a Picanol loom log file (<code style="color:var(--amber)">commserver_*.txt</code>) using the panel on the left to see a clean, human-readable timeline (newest events on top).</p>
     </div>
     <div id="events-container" style="display:none;"></div>
   </main>
@@ -522,6 +522,11 @@ const YARN_COLORS = {
 // ─── Active filter state ───
 let currentFilter = 'all';
 let allEvents = [];
+
+// sort helper: newest first (descending timestamp)
+function sortEventsDesc(events) {
+  events.sort((a, b) => (b.time || '').localeCompare(a.time || ''));
+}
 
 function setFilter(cat) {
   currentFilter = cat;
@@ -703,39 +708,35 @@ function parseLog(text, filename) {
   flushYarn(); // flush any trailing yarn events
 
   allEvents = events;
-  
+  sortEventsDesc(allEvents);   // <-- enforce newest first globally
+
   // Counts
   const cats = ['startup','operator','article','cloth','design','yarn','setting'];
-  document.getElementById('cnt-all').textContent = events.length;
+  document.getElementById('cnt-all').textContent = allEvents.length;
   cats.forEach(c => {
-    document.getElementById('cnt-' + c).textContent = events.filter(e => e.cat === c).length;
+    document.getElementById('cnt-' + c).textContent = allEvents.filter(e => e.cat === c).length;
   });
 
-  // Stats
-  const times = events.map(e => e.time).filter(Boolean).sort();
+  // Stats (oldest to newest for range)
+  const times = allEvents.map(e => e.time).filter(Boolean).sort();
   document.getElementById('stat-filename').textContent = filename.length > 16 ? filename.slice(0,14)+'…' : filename;
   document.getElementById('stat-start').textContent = times[0] ? formatTime(times[0], 'date') : '—';
   document.getElementById('stat-end').textContent   = times[times.length-1] ? formatTime(times[times.length-1], 'date') : '—';
-  document.getElementById('stat-total').textContent = events.length;
+  document.getElementById('stat-total').textContent = allEvents.length;
   document.getElementById('sidebar-stats').style.display = 'block';
 
   // Update header
-  const machineMatch = events.find(e => e.detail && e.detail.includes('LOOM'));
-  const articleNames = events.filter(e => e.cat === 'article').map(e => {
-    const m = e.detail && e.detail.match(/>([^<]+)</);
-    return m ? m[1] : '';
-  }).filter(Boolean);
   document.getElementById('header-meta').innerHTML =
     `<strong>File:</strong> ${filename} &nbsp;·&nbsp; ` +
-    `<strong>Events:</strong> ${events.length} &nbsp;·&nbsp; ` +
-    `<span class="status-dot"></span><strong>Parsed OK</strong>`;
+    `<strong>Events:</strong> ${allEvents.length} &nbsp;·&nbsp; ` +
+    `<span class="status-dot"></span><strong>Parsed OK (newest first)</strong>`;
 
   document.getElementById('empty-state').style.display = 'none';
   document.getElementById('events-container').style.display = 'block';
   renderEvents();
 }
 
-// ─── Rendering ───
+// ─── Rendering (newest first, days descending) ───
 function renderEvents() {
   const container = document.getElementById('events-container');
   const filtered = currentFilter === 'all' ? allEvents : allEvents.filter(e => e.cat === currentFilter);
@@ -749,7 +750,7 @@ function renderEvents() {
     return;
   }
 
-  // Group by day
+  // Group by day (filtered already sorted newest first)
   const byDay = {};
   filtered.forEach(ev => {
     const day = (ev.time || '').slice(0, 10);
@@ -781,7 +782,12 @@ function renderEvents() {
   });
   html += `</div>`;
 
-  Object.entries(byDay).forEach(([day, dayEvents]) => {
+  // iterate days in descending order (newest day first)
+  const sortedDays = Object.keys(byDay).sort().reverse();
+  sortedDays.forEach(day => {
+    const dayEvents = byDay[day];
+    // ensure events within day are also newest first (already sorted globally, but double-check)
+    dayEvents.sort((a,b) => (b.time || '').localeCompare(a.time || ''));
     const dayLabel = formatDateLabel(day);
     html += `<div class="day-group">`;
     html += `<div class="day-header">${dayLabel} <span style="color:var(--border)">—</span> ${dayEvents.length} event${dayEvents.length !== 1 ? 's' : ''}</div>`;
@@ -823,7 +829,7 @@ function renderYarnGroup(ev, idx) {
   const timeStr = formatTime(ev.time, 'time');
   const dateStr = formatTime(ev.time, 'date');
   const badge = `<span class="badge badge-yarn">Yarn</span>`;
-  const id = `yarn-${idx}`;
+  const id = `yarn-${Date.now()}-${idx}-${Math.random()}`;
 
   // Build swatch preview
   const swatches = ev.channels.map(c => {
@@ -894,8 +900,7 @@ function formatDateLabel(day) {
   } catch(e) { return day; }
 }
 
-// ─── Auto-load demo data from embedded log if no file dropped ───
-// Pre-parsed events from the uploaded log for instant demo view
+// ─── DEMO DATA (chronologically mixed, but we sort descending at init) ───
 const DEMO_LOG = [
   { cat:'startup',  time:'2026-01-23T19:03:21.977', title:'Machine Online — Ready', detail:'Communication server and machine controller fully initialised.', icon:'🟢' },
   { cat:'article',  time:'2026-01-23T23:56:44.507', title:'New Article Started', detail:'Article: <span class="value">LOOM-19.EP</span>', icon:'🧾' },
@@ -929,23 +934,24 @@ const DEMO_LOG = [
   { cat:'operator', time:'2026-01-24T11:13:33.988', title:'Operator Logged Off', detail:'Session ended.', icon:'🚪' },
 ];
 
-// Load demo automatically
+// Load demo with newest-first ordering
 (function initDemo() {
   allEvents = DEMO_LOG;
+  sortEventsDesc(allEvents);   // <-- newest first
   const cats = ['startup','operator','article','cloth','design','yarn','setting'];
-  document.getElementById('cnt-all').textContent = DEMO_LOG.length;
+  document.getElementById('cnt-all').textContent = allEvents.length;
   cats.forEach(c => {
-    document.getElementById('cnt-' + c).textContent = DEMO_LOG.filter(e => e.cat === c).length;
+    document.getElementById('cnt-' + c).textContent = allEvents.filter(e => e.cat === c).length;
   });
   document.getElementById('stat-filename').textContent = 'commserver_85.txt';
   document.getElementById('stat-start').textContent = '23 Jan 2026';
   document.getElementById('stat-end').textContent = '24 Jan 2026';
-  document.getElementById('stat-total').textContent = DEMO_LOG.length;
+  document.getElementById('stat-total').textContent = allEvents.length;
   document.getElementById('sidebar-stats').style.display = 'block';
   document.getElementById('empty-state').style.display = 'none';
   document.getElementById('events-container').style.display = 'block';
   document.getElementById('header-meta').innerHTML =
-    '<strong>Machine:</strong> LOOM-19 &nbsp;·&nbsp; <strong>Log:</strong> 23–24 Jan 2026 &nbsp;·&nbsp; <span class="status-dot"></span><strong>Demo loaded — upload your file to parse a new log</strong>';
+    '<strong>Machine:</strong> LOOM-19 &nbsp;·&nbsp; <strong>Log:</strong> 23–24 Jan 2026 &nbsp;·&nbsp; <span class="status-dot"></span><strong>NEWEST FIRST — upload any log to parse</strong>';
   renderEvents();
 })();
 </script>
