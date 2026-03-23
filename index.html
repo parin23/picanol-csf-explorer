@@ -692,6 +692,17 @@ function parseLog(text, filename) {
       return;
     }
 
+    if (msg.includes('VGS_ID_REQUESTED_MACHINE_SPEED')) {
+      flushYarn();
+      const val = (msg.match(/to\s+([\d.]+)$/) || [])[1] || '?';
+      events.push({ cat: 'setting', time: ts, level,
+        title: 'Machine Speed Set',
+        detail: `Value: <span class="value">${val}</span>`,
+        icon: '⚙️'
+      });
+      return;
+    }
+
     // ── Yarn channel colour ──
     if (msg.includes('VGS_ID_ISYS_CH_X_COLOR')) {
       const chMatch = msg.match(/COLOR - (\d+) - 0.*?to (\d+)/);
