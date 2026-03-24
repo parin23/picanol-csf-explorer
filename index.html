@@ -707,7 +707,7 @@ function parseLog(text, filename) {
       const val = (msg.match(/to\s+([\d.]+)$/) || [])[1] || '?';
       events.push({ cat: 'cloth', time: ts, level,
         title: 'Ground Beam Diameter Set',
-        detail: `Value: <span class="value">${val * 1000} mm</span>`,
+        detail: `Value: <span class="value">${(val * 1000).toFixed(2)} mm</span>`,
         icon: '📏'
       });
       return;
@@ -741,7 +741,7 @@ function parseLog(text, filename) {
       const val = (msg.match(/to\s+([\d.]+)$/) || [])[1] || '?';
       events.push({ cat: 'setting', time: ts, level,
         title: 'Pick Density Set',
-        detail: `Value: <span class="value">${val/39.37} Picks/Inch </span>`,
+        detail: `Value: <span class="value">${(val/39.37).toFixed(3)} Picks/Inch </span>`,
         icon: '⚙️'
       });
       return;
