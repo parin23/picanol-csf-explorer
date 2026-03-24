@@ -692,6 +692,28 @@ function parseLog(text, filename) {
       return;
     }
 
+    if (msg.includes('VGS_ID_ELO_FANCY_REQUESTED_TENSION_TSF')) {
+      flushYarn();
+      const val = (msg.match(/to\s+([\d.]+)$/) || [])[1] || '?';
+      events.push({ cat: 'setting', time: ts, level,
+        title: 'Top Beam Tension Set',
+        detail: `Value: <span class="value">${val}</span>`,
+        icon: '⚙️'
+      });
+      return;
+    }
+
+    if (msg.includes('VGS_ID_ELO_GROUND_REQUESTED_TENSION_TSF')) {
+      flushYarn();
+      const val = (msg.match(/to\s+([\d.]+)$/) || [])[1] || '?';
+      events.push({ cat: 'setting', time: ts, level,
+        title: 'Ground Beam Tension Set',
+        detail: `Value: <span class="value">${val}</span>`,
+        icon: '⚙️'
+      });
+      return;
+    }
+
     if (msg.includes('VGS_ID_REQUESTED_MACHINE_SPEED')) {
       flushYarn();
       const val = (msg.match(/to\s+([\d.]+)$/) || [])[1] || '?';
