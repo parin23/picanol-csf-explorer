@@ -741,7 +741,7 @@ function parseLog(text, filename) {
       const val = (msg.match(/to\s+([\d.]+)$/) || [])[1] || '?';
       events.push({ cat: 'setting', time: ts, level,
         title: 'Pick Density Set',
-        detail: `Value: <span class="value">${val}</span>`,
+        detail: `Value: <span class="value">${val/39.37} Picks/Inch </span>`,
         icon: '⚙️'
       });
       return;
