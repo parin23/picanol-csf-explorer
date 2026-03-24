@@ -599,6 +599,16 @@ function parseLog(text, filename) {
       return;
     }
 
+    if (msg.includes('VGS_ID_ELO_BEAM_CHANGE') && msg.includes('MachineReady')) {
+      flushYarn();
+      events.push({ cat: 'startup', time: ts, level,
+        title: 'Machine Online — Ready',
+        detail: 'Communication server and machine controller fully initialised.',
+        icon: '🟢'
+      });
+      return;
+    }
+
     // ── Operator login ──
     if (context.includes('onLogin') && msg.includes('Logged in')) {
       flushYarn();
@@ -669,6 +679,51 @@ function parseLog(text, filename) {
       });
       return;
     }
+
+    if (msg.includes('VGS_ID_ELO_FANCY_RIGHT_WARP_OUT_PREDICTION_INITIAL_LENGTH')) {
+      flushYarn();
+      const val = (msg.match(/to\s+([\d.]+)$/) || [])[1] || '?';
+      events.push({ cat: 'cloth', time: ts, level,
+        title: 'Top Beam Meter Set',
+        detail: `Value: <span class="value">${val}</span>`,
+        icon: '📏'
+      });
+      return;
+    }
+
+    if (msg.includes('VGS_ID_ELO_RIGHT_WARP_OUT_PREDICTION_INITIAL_LENGTH')) {
+      flushYarn();
+      const val = (msg.match(/to\s+([\d.]+)$/) || [])[1] || '?';
+      events.push({ cat: 'cloth', time: ts, level,
+        title: 'Ground Beam Meter Set',
+        detail: `Value: <span class="value">${val}</span>`,
+        icon: '📏'
+      });
+      return;
+    }
+
+    if (msg.includes('VGS_ID_ELO_DIAMETER_OFFSET')) {
+      flushYarn();
+      const val = (msg.match(/to\s+([\d.]+)$/) || [])[1] || '?';
+      events.push({ cat: 'cloth', time: ts, level,
+        title: 'Ground Beam Diameter Set',
+        detail: `Value: <span class="value">${val * 100} cm</span>`,
+        icon: '📏'
+      });
+      return;
+    }
+
+    if (msg.includes('VGS_ID_ELO_FANCY_DIAMETER_OFFSET')) {
+      flushYarn();
+      const val = (msg.match(/to\s+([\d.]+)$/) || [])[1] || '?';
+      events.push({ cat: 'cloth', time: ts, level,
+        title: 'Top Beam Diameter Set',
+        detail: `Value: <span class="value">${val * 100} cm</span>`,
+        icon: '📏'
+      });
+      return;
+    }
+
 
     // ── Preselection / weft count setting ──
     if (msg.includes('VGS_ID_PROMON_PRESELECTION_SETTING')) {
