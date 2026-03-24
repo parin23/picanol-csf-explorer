@@ -707,7 +707,7 @@ function parseLog(text, filename) {
       const val = (msg.match(/to\s+([\d.]+)$/) || [])[1] || '?';
       events.push({ cat: 'cloth', time: ts, level,
         title: 'Ground Beam Diameter Set',
-        detail: `Value: <span class="value">${val * 100} cm</span>`,
+        detail: `Value: <span class="value">${val * 1000} mm</span>`,
         icon: '📏'
       });
       return;
@@ -718,7 +718,7 @@ function parseLog(text, filename) {
       const val = (msg.match(/to\s+([\d.]+)$/) || [])[1] || '?';
       events.push({ cat: 'cloth', time: ts, level,
         title: 'Top Beam Diameter Set',
-        detail: `Value: <span class="value">${val * 100} cm</span>`,
+        detail: `Value: <span class="value">${val * 1000} mm</span>`,
         icon: '📏'
       });
       return;
@@ -752,7 +752,7 @@ function parseLog(text, filename) {
       const val = (msg.match(/to\s+([\d.]+)$/) || [])[1] || '?';
       events.push({ cat: 'setting', time: ts, level,
         title: 'Top Beam Tension Set',
-        detail: `Value: <span class="value">${val}</span>`,
+        detail: `Value: <span class="value">${val/1000} kN</span>`,
         icon: '⚙️'
       });
       return;
@@ -763,7 +763,7 @@ function parseLog(text, filename) {
       const val = (msg.match(/to\s+([\d.]+)$/) || [])[1] || '?';
       events.push({ cat: 'setting', time: ts, level,
         title: 'Ground Beam Tension Set',
-        detail: `Value: <span class="value">${val}</span>`,
+        detail: `Value: <span class="value">${val/1000} kN</span>`,
         icon: '⚙️'
       });
       return;
