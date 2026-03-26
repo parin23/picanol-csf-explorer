@@ -451,6 +451,47 @@
     header { padding: 0 1rem; }
     .header-meta { display: none; }
   }
+
+  /* ===== DEMO ALERT ===== */
+  .demo-alert {
+    background: var(--red-dim);
+    border: 2px solid var(--red);
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    margin-bottom: 1.5rem;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    animation: fadeIn 0.3s ease;
+  }
+  .demo-alert.hidden { display: none; }
+  .demo-alert .alert-icon { font-size: 1.5rem; flex-shrink: 0; }
+  .demo-alert .alert-content { flex: 1; }
+  .demo-alert .alert-title {
+    font-family: 'Barlow Condensed', sans-serif;
+    font-weight: 700;
+    font-size: 1rem;
+    color: var(--red);
+    margin-bottom: 0.2rem;
+  }
+  .demo-alert .alert-text {
+    font-size: 0.85rem;
+    color: var(--text-dim);
+  }
+  .demo-alert .dismiss-btn {
+    background: none;
+    border: 1px solid var(--red);
+    border-radius: 4px;
+    color: var(--red);
+    cursor: pointer;
+    padding: 0.3rem 0.6rem;
+    font-size: 1rem;
+    transition: all 0.15s;
+  }
+  .demo-alert .dismiss-btn:hover {
+    background: var(--red);
+    color: var(--bg);
+  }
 </style>
 </head>
 <body>
@@ -539,10 +580,20 @@
 
   <!-- MAIN -->
   <main class="main" id="main">
+    <!-- Demo Alert -->
+    <div class="demo-alert" id="demo-alert">
+      <span class="alert-icon">⚠️</span>
+      <div class="alert-content">
+        <div class="alert-title">DEMO DATA — NOT REAL</div>
+        <div class="alert-text">Upload your commserver log file (zip or txt) to see actual events</div>
+      </div>
+      <button class="dismiss-btn" onclick="dismissDemoAlert()" title="Dismiss">✕</button>
+    </div>
+    
     <div class="empty-state" id="empty-state">
       <div class="big-icon">🏭</div>
       <h2>No Log Loaded</h2>
-      <p>Upload a Picanol loom log file (<code style="color:var(--amber)">commserver_*.txt</code>) using the panel on the left to see a clean, human-readable timeline (newest events on top).</p>
+      <p>Upload a Picanol loom log file (<code style="color:var(--amber)">.zip or .txt</code>) using the panel on the left to see a clean, human-readable timeline (newest events on top).</p>
     </div>
     <div id="events-container" style="display:none;"></div>
   </main>
@@ -595,6 +646,7 @@ const YARN_COLORS = {
 // ─── Active filter state ───
 let currentFilter = 'all';
 let allEvents = [];
+let realFileLoaded = false;
 
 // sort helper: newest first (descending timestamp)
 function sortEventsDesc(events) {
@@ -605,6 +657,16 @@ function setFilter(cat) {
   currentFilter = cat;
   document.querySelectorAll('.filter-btn').forEach(b => b.classList.toggle('active', b.dataset.cat === cat));
   renderEvents();
+}
+
+function dismissDemoAlert() {
+  document.getElementById('demo-alert').classList.add('hidden');
+  sessionStorage.setItem('demoAlertDismissed', 'true');
+}
+
+function showDemoAlert() {
+  if (sessionStorage.getItem('demoAlertDismissed') === 'true') return;
+  document.getElementById('demo-alert').classList.remove('hidden');
 }
 
 // ─── File loading ───
@@ -622,6 +684,8 @@ function loadFile(e) {
 }
 function processFile(file) {
   const filename = file.name.toLowerCase();
+  realFileLoaded = true;
+  document.getElementById('demo-alert').classList.add('hidden');
   
   if (filename.endsWith('.zip')) {
     processZipFile(file);
@@ -1190,6 +1254,7 @@ const DEMO_LOG = [
   document.getElementById('header-meta').innerHTML =
     '<strong>Machine:</strong> LOOM-19 &nbsp;·&nbsp; <strong>Log:</strong> 23–24 Jan 2026 &nbsp;·&nbsp; <span class="status-dot"></span><strong>NEWEST FIRST — upload any log to parse</strong>';
   renderEvents();
+  showDemoAlert();
 })();
 </script>
 </body>
