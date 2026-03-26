@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Picanol Loom — Event Viewer (Newest First)</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;600;700;900&family=Barlow:wght@300;400;500&family=Share+Tech+Mono&display=swap');
 
@@ -510,11 +511,21 @@
     <!-- Upload -->
     <div class="upload-zone" id="drop-zone" onclick="document.getElementById('file-input').click()"
          ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleDrop(event)">
-      <div class="upload-icon">📂</div>
-      <p>Drop log file here<br>or click to browse</p>
-      <p class="upload-hint">commserver_*.txt</p>
+      <div class="upload-icon" id="upload-icon">📂</div>
+      <p id="upload-text">Drop log file here<br>or click to browse</p>
+      <p class="upload-hint">.zip or .txt</p>
     </div>
-    <input type="file" id="file-input" accept=".txt,.log" onchange="loadFile(event)">
+    <input type="file" id="file-input" accept=".zip,.txt,.log" onchange="loadFile(event)">
+    
+    <!-- Progress indicator -->
+    <div id="progress-zone" style="display:none; margin: 0.8rem;">
+      <div style="text-align:center; color:var(--text-muted); font-size:0.78rem; margin-bottom:0.5rem;">
+        <span id="progress-text">Extracting...</span>
+      </div>
+      <div style="background:var(--surface2); border-radius:4px; height:4px; overflow:hidden;">
+        <div id="progress-bar" style="background:var(--amber); height:100%; width:0%; transition:width 0.2s;"></div>
+      </div>
+    </div>
 
     <!-- Stats -->
     <div class="sidebar-stats" id="sidebar-stats" style="display:none;">
@@ -610,12 +621,88 @@ function loadFile(e) {
   if (file) processFile(file);
 }
 function processFile(file) {
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    const text = e.target.result;
-    parseLog(text, file.name);
-  };
-  reader.readAsText(file);
+  const filename = file.name.toLowerCase();
+  
+  if (filename.endsWith('.zip')) {
+    processZipFile(file);
+  } else {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const text = e.target.result;
+      parseLog(text, file.name);
+    };
+    reader.readAsText(file);
+  }
+}
+
+function showProgress(show, text = '') {
+  const zone = document.getElementById('progress-zone');
+  const bar = document.getElementById('progress-bar');
+  const label = document.getElementById('progress-text');
+  zone.style.display = show ? 'block' : 'none';
+  if (text) label.textContent = text;
+  if (show) bar.style.width = '10%';
+}
+
+function updateProgress(percent) {
+  const bar = document.getElementById('progress-bar');
+  bar.style.width = percent + '%';
+}
+
+async function processZipFile(file) {
+  try {
+    showProgress(true, 'Loading zip...');
+    
+    const zip = await JSZip.loadAsync(file, { createFolders: true });
+    updateProgress(20);
+    
+    const commserverFiles = [];
+    zip.forEach((path, zipEntry) => {
+      if (!zipEntry.dir && path.toLowerCase().includes('terminal/commserver/')) {
+        const ext = path.toLowerCase();
+        if (ext.endsWith('.txt') || ext.endsWith('.log')) {
+          commserverFiles.push({ path, entry: zipEntry });
+        }
+      }
+    });
+    
+    updateProgress(40);
+    
+    if (commserverFiles.length === 0) {
+      showProgress(false);
+      alert('No commserver files found in zip.\n\nExpected structure: terminal/commserver/*.txt');
+      return;
+    }
+    
+    commserverFiles.sort((a, b) => a.path.localeCompare(b.path));
+    
+    showProgress(true, `Parsing ${commserverFiles.length} Logs...`);
+    
+    const mergedLines = [];
+    const total = commserverFiles.length;
+    
+    for (let i = 0; i < total; i++) {
+      const { entry } = commserverFiles[i];
+      const content = await entry.async('string');
+      const lines = content.split(/\r?\n/);
+      mergedLines.push(...lines);
+      
+      updateProgress(40 + Math.round((i / total) * 55));
+    }
+    
+    updateProgress(98);
+    
+    const mergedText = mergedLines.join('\n');
+    const filename = file.name.replace(/\.zip$/i, '');
+    
+    showProgress(false);
+    parseLog(mergedText, filename + '.txt (from zip)');
+    
+  } catch (err) {
+    showProgress(false);
+    console.error('Zip extraction error:', err);
+    alert('Failed to extract zip file: ' + err.message);
+  }
 }
 
 // ─── Parsing ───
