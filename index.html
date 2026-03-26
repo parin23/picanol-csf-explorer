@@ -28,6 +28,27 @@
     --text-muted: #64748b;
     --text-dim: #94a3b8;
   }
+  :root[data-theme="light"] {
+    --bg: #f8fafc;
+    --surface: #ffffff;
+    --surface2: #f1f5f9;
+    --border: #e2e8f0;
+    --amber: #d97706;
+    --amber-dim: rgba(217,119,6,0.1);
+    --green: #059669;
+    --green-dim: rgba(5,150,105,0.1);
+    --blue: #2563eb;
+    --blue-dim: rgba(37,99,235,0.1);
+    --red: #dc2626;
+    --red-dim: rgba(220,38,38,0.1);
+    --purple: #7c3aed;
+    --purple-dim: rgba(124,58,237,0.1);
+    --cyan: #0891b2;
+    --cyan-dim: rgba(8,145,178,0.1);
+    --text: #1e293b;
+    --text-muted: #64748b;
+    --text-dim: #475569;
+  }
 
   * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -69,6 +90,22 @@
     line-height: 1.6;
   }
   .header-meta strong { color: var(--text-dim); }
+  .theme-toggle {
+    margin-left: auto;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.4rem 0.8rem;
+    cursor: pointer;
+    color: var(--text-dim);
+    font-size: 0.85rem;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    transition: all 0.15s;
+  }
+  .theme-toggle:hover { border-color: var(--amber); color: var(--amber); }
+  .theme-toggle .icon { font-size: 1rem; }
   .status-dot {
     width: 8px; height: 8px; border-radius: 50%;
     background: var(--green);
@@ -402,7 +439,7 @@
   .swatch-row { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
   .swatch {
     width: 14px; height: 14px; border-radius: 3px;
-    border: 1px solid rgba(255,255,255,0.1);
+    border: 1px solid var(--border);
     display: inline-block;
   }
 
@@ -423,6 +460,10 @@
     <strong>Machine:</strong> LOOM-19 &nbsp;·&nbsp;
     <span class="status-dot"></span><strong>Log loaded (newest first)</strong>
   </div>
+  <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Toggle theme">
+    <span class="icon" id="theme-icon">🌙</span>
+    <span id="theme-label">Dark</span>
+  </button>
 </header>
 
 <div class="app">
@@ -498,6 +539,27 @@
 </div>
 
 <script>
+// ─── Theme toggle ───
+function toggleTheme() {
+  const html = document.documentElement;
+  const isLight = html.getAttribute('data-theme') === 'light';
+  const newTheme = isLight ? 'dark' : 'light';
+  html.setAttribute('data-theme', newTheme);
+  localStorage.setItem('theme', newTheme);
+  updateThemeUI(newTheme);
+}
+
+function updateThemeUI(theme) {
+  document.getElementById('theme-icon').textContent = theme === 'light' ? '☀️' : '🌙';
+  document.getElementById('theme-label').textContent = theme === 'light' ? 'Light' : 'Dark';
+}
+
+(function initTheme() {
+  const saved = localStorage.getItem('theme') || 'dark';
+  document.documentElement.setAttribute('data-theme', saved);
+  updateThemeUI(saved);
+})();
+
 // ─── Yarn colour palette (Picanol ISYS channel colour IDs → descriptive name + swatch) ───
 const YARN_COLORS = {
   0:  { name: 'Not Set',     hex: '#374151' },
