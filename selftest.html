@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<title>CSF Explorer — self test</title>
+<style>
+  body { background: #0d1117; color: #e2e8f0; font: 14px/1.6 ui-monospace, monospace; padding: 2rem; }
+  .pass { color: #10b981; } .fail { color: #ef4444; } h1 { font-size: 1.1rem; margin-bottom: 1rem; }
+</style>
+</head>
+<body>
+<h1>CSF Explorer — self test</h1>
+<pre id="out"></pre>
+
+<script src="js/decode.js"></script>
+<script src="js/model.js"></script>
+<script>
+const out = document.getElementById('out');
+let failed = 0;
+function check(name, cond, got) {
+  const ok = !!cond;
+  if (!ok) failed++;
+  out.innerHTML += `<span class="${ok ? 'pass' : 'fail'}">${ok ? 'PASS' : 'FAIL'}</span>  ${name}` +
+    (ok ? '' : `  → got: ${got}`) + '\n';
+}
+
+// ── export XML ──
+const xml = `<production>
+<data date="2026/09/29" time="05:13:24" serial="453844" shift="B" absolute_picks="176498478" absolute_length="49822.73" type="start" subtype1="start"/>
+<data date="2026/09/29" time="05:13:37" serial="453844" shift="B" absolute_picks="176498565" absolute_length="49822.74" type="stop" subtype1="filling" subtype2="FD left gripper" channel="8" mssg_nr="60918" picks="87"/>
+<data date="2026/09/29" time="08:00:00" serial="453844" shift="A" absolute_picks="176528038" absolute_length="49829.53" type="shift" subtype1="A"/>
+</production>`;
+const ev = [];
+Decode.exportXml(xml, ev);
+check('export: 3 events', ev.length === 3, ev.length);
+check('export: start parsed', ev[0].kind === 'start' && ev[0].picks === 176498478, JSON.stringify(ev[0]));
+check('export: stop reason label', ev[1].label === 'FD left gripper' && ev[1].mssg === 60918, JSON.stringify(ev[1]));
+check('export: stop since-picks', ev[1].sincePicks === 87, ev[1].sincePicks);
+check('export: timestamp normalised', ev[0].t === '2026-09-29T05:13:24', ev[0].t);
+check('export: shift event', ev[2].kind === 'shift' && ev[2].title === 'A', JSON.stringify(ev[2]));
+
+// ── text log: operator, article, pick variation grouping ──
+const L = 'D;1;info;';
+const log = [
+  L + '2026-09-29T05:00:00.000;StyleFile.ActivateNewProdMonArticle.execute;Starting new production monitoring article: NS-1400-36-82.EP',
+  L + '2026-09-29T05:00:10.000;Communication.RC90Poller.Poller.onModifyRequest;1: Request to change VGS_ID_PICK_DENSITY_PER_METER - 0 - 0 of type float to 1417.3228759765625',
+  L + '2026-09-29T05:00:20.000;Communication.RC90Poller.Poller.onModifyRequest;1: Request to change VGS_ID_PICK_DENSITY_PER_METER - 0 - 0 of type float to 3228.346435546875',
+  L + '2026-09-29T06:00:00.000;Communication.RC90Poller.Poller.onModifyRequest;1: Request to change VGS_ID_PICK_DENSITY_PER_METER - 0 - 0 of type float to 1968.50390625',
+  L + '2026-09-29T07:00:00.000;Auth.onLogin;Logged in with session key: {abc-123}, userId: 42',
+].join('\n');
+const ev2 = [];
+Decode.textLog(log, ev2, 'test');
+const pick = ev2.filter(e => e.kind === 'pick');
+check('log: article captured', ev2.some(e => e.kind === 'articleLog' && e.detail === 'NS-1400-36-82.EP'), JSON.stringify(ev2));
+check('log: two densities grouped (36+82)', pick.length === 2 && pick[0].values.length === 2, JSON.stringify(pick));
+check('log: 1417 -> 36 picks/inch', Math.round(pick[0].values[0] / 39.37) === 36, pick[0].values[0]);
+check('log: 3228 -> 82 picks/inch', Math.round(pick[0].values[1] / 39.37) === 82, pick[0].values[1]);
+check('log: far-apart density split', pick[1].values.length === 1, JSON.stringify(pick[1]));
+check('log: operator login', ev2.some(e => e.kind === 'operator' && e.title === 'Operator Logged In'), '');
+
+// ── btf: framing + big-endian reason code + clock ──
+function record(type, clock, code) {
+  const r = new Uint8Array(48);
+  r.set([0x03, 0x00, 0x01, type], 0);
+  new DataView(r.buffer).setUint32(4, clock);              // big-endian clock
+  new DataView(r.buffer).setUint16(38, code);              // big-endian mssg_nr
+  return r;
+}
+const bytes = new Uint8Array(96);
+bytes.set(record(0x93, 0x8cd74631, 60918), 0);
+bytes.set(record(0x93, 0x8cd74632, 50207), 48);
+const raw = Decode.btfStartstopRaw([bytes]);
+check('btf: two records decoded', raw.length === 2, JSON.stringify(raw));
+check('btf: clock big-endian', raw[0].clock === 0x8cd74631, raw[0].clock && raw[0].clock.toString(16));
+check('btf: reason code big-endian', raw[0].code === 60918 && raw[1].code === 50207, JSON.stringify(raw.map(r => r.code)));
+const solved = Decode.btfToEvents(raw, Date.parse('2026-09-29T00:00:00Z') / 1000, Date.parse('2026-09-30T00:00:00Z') / 1000);
+check('btf: clock resolves inside the known span', solved.events.length === 2, solved.events.length);
+
+// ── model: efficiency, picks, downtime by reason ──
+const m = Model.build([
+  { t: '2026-09-29T08:00:00', kind: 'shift', title: 'A', src: 'export' },
+  { t: '2026-09-29T08:00:00', kind: 'start', picks: 1000, length: 100, src: 'export' },
+  { t: '2026-09-29T09:00:00', kind: 'stop', picks: 2000, length: 120, mssg: 60918, label: 'FD left gripper', src: 'export' },
+  { t: '2026-09-29T09:30:00', kind: 'start', picks: 2000, length: 120, src: 'export' },
+  { t: '2026-09-29T10:00:00', kind: 'stop', picks: 2600, length: 150, mssg: 50207, label: 'Manual stop', src: 'export' },
+]);
+check('model: events sorted', m.events.length === 5, m.events.length);
+check('model: picks counted', m.picks === 1600, m.picks);
+check('model: metres counted', m.metres === 50, m.metres);
+check('model: two stops', m.stopCount === 2, m.stopCount);
+check('model: downtime by reason', m.byReason.length === 2 && m.byReason[0].sec === 1800, JSON.stringify(m.byReason));
+check('model: efficiency 75%', Math.abs(m.efficiency - 0.75) < 1e-9, m.efficiency);
+check('model: article list empty', m.articles.length === 0, m.articles.length);
+
+// ── model: binary stops duplicated by the export are dropped ──
+const dup = Model.build([
+  { t: '2026-09-29T08:00:00', kind: 'start', picks: 0, length: 0, src: 'export' },
+  { t: '2026-09-29T08:10:00', kind: 'stop', picks: 100, length: 10, mssg: 50967, label: 'Bobbin', src: 'export' },
+  { t: '2026-09-29T08:10:02', kind: 'stop', picks: 0, length: 0, mssg: 50967, label: 'Bobbin', src: 'btf' },
+]);
+check('model: duplicate binary stop dropped', dup.stopCount === 1, dup.stopCount);
+
+// ── pattern records: the Jacquard design index tables ──
+const patternXml = `<?xml version="1.0"?><machine><style><design name="Navsutra mc 9">
+ <config><jacquard>TRUE</jacquard><patternCount>2</patternCount><patternList>Color,PickDensity</patternList>
+ <selections><selection>0,1</selection></selections></config>
+ <patterns><pattern type="Color"><attribs><source>External</source></attribs></pattern>
+ <pattern type="PickDensity"><attribs><source>External</source></attribs></pattern></patterns>
+ <indexTables><table type="Color"><nrOfLines>2</nrOfLines><data>1,0</data></table>
+ <table type="PickDensity"><nrOfLines>2</nrOfLines><data>36.00,82.00</data>
+ <attribs><indexUnit>Picks/Inch</indexUnit></attribs></table></indexTables></design></style></machine>`;
+const design = Decode.patternDesign(new TextEncoder().encode(patternXml));
+check('pattern: design name', design && design.design === 'Navsutra mc 9', design && design.design);
+check('pattern: jacquard flag', design && design.jacquard === true, design && design.jacquard);
+const pd = design.tables.find(t => t.type === 'PickDensity');
+check('pattern: two densities 36 + 82', pd.values.join(',') === '36,82', pd.values);
+check('pattern: unit is Picks/Inch', pd.unit === 'Picks/Inch', pd.unit);
+check('pattern: nrOfLines read', pd.lines === 2, pd.lines);
+const many = Decode.patternDesign(new TextEncoder().encode(patternXml.replace('36.00,82.00', '30.00,36.00,50.00,82.00').replace('<nrOfLines>2</nrOfLines><data>36', '<nrOfLines>4</nrOfLines><data>30')));
+const manyPd = many.tables.find(t => t.type === 'PickDensity');
+check('pattern: four densities supported', manyPd.values.length === 4, manyPd.values);
+
+// ── kernel log + memory trace ──
+const kern = Decode.kernelLog([
+  'random noise',
+  'Jan  1 10:00:01 host kernel: Oops: 0002 [#1] SMP PTI',
+  'Jan  1 10:00:02 host kernel: Out of memory: Killed process 1234',
+  'Jan  1 10:00:03 host kernel: thermal throttled',
+].join('\n'), 'kernel');
+check('kernel: three notable lines', kern.length === 3, kern.length);
+check('kernel: kernel fault labelled', kern[0].title === 'Kernel fault', kern[0] && kern[0].title);
+check('kernel: OOM labelled', kern[1].title === 'Out of memory', kern[1] && kern[1].title);
+const mem = Decode.memoryTrace('Date;Total;Free;Available\n2026-01-01 00:00:00;8000000;2000000;2100000\n2026-01-01 00:01:00;8000000;1900000;1950000\n');
+check('memory: samples parsed', mem && mem.samples === 2, mem && mem.samples);
+check('memory: peak used computed', mem && Math.abs(mem.maxUsed - 75.625) < 0.01, mem && mem.maxUsed);
+
+// ── model: feeders, hourly buckets, design sets ──
+const fed = Model.build([
+  { t: '2026-09-29T08:00:00', kind: 'start', picks: 0, length: 0, src: 'export' },
+  { t: '2026-09-29T08:05:00', kind: 'stop', picks: 500, length: 10, mssg: 60918, channel: '8', label: 'FD left gripper', sincePicks: 500, src: 'export' },
+  { t: '2026-09-29T08:20:00', kind: 'start', picks: 500, length: 10, src: 'export' },
+  { t: '2026-09-29T08:25:00', kind: 'stop', picks: 700, length: 14, mssg: 60917, channel: '3', label: 'FD not taken', sincePicks: 200, src: 'export' },
+], [{ design: 'Navsutra mc 9', jacquard: true, tables: [{ type: 'PickDensity', unit: 'Picks/Inch', lines: 2, values: [36, 82] }] }]);
+check('model: feeders grouped by channel', fed.feeders.length === 2, fed.feeders.length);
+check('model: feeder stop count', fed.feeders.find(f => f.channel === '8').stops === 1, JSON.stringify(fed.feeders));
+check('model: feeder downtime = gap to next start', Math.round(fed.feeders.find(f => f.channel === '8').sec) === 900, fed.feeders.find(f => f.channel === '8').sec);
+check('model: hourly buckets produced', fed.hourly.length === 1, fed.hourly.length);
+check('model: hourly efficiency between 0 and 1', fed.hourly[0].efficiency > 0 && fed.hourly[0].efficiency < 1, fed.hourly[0].efficiency);
+check('model: design density set decoded', fed.designs.length === 1 && fed.designs[0].densities.join(',') === '36,82', JSON.stringify(fed.designs));
+
+// ── robustness: junk input must never throw ──
+for (const junk of [null, undefined, '', 'not xml', '<data/>', '<data type="stop"/>']) {
+  let threw = null;
+  try {
+    const out = [];
+    Decode.exportXml(junk, out);
+    Decode.textLog(junk, out, 'x');
+    Decode.kernelLog(junk, 'x');
+    Decode.machineDesc(junk); Decode.terminalDesc(junk); Decode.spareParts(junk); Decode.shiftRegimes(junk);
+    Decode.patternDesign(junk ? new TextEncoder().encode(junk) : junk);
+    Decode.btfRecords(junk ? new Uint8Array(8) : junk);
+  } catch (e) { threw = e.message; }
+  check('junk input handled: ' + JSON.stringify(junk), !threw, threw);
+}
+const empty = Model.build([], []);
+check('model: empty input produces a usable model', empty.events.length === 0 && empty.picks === 0 && empty.feeders.length === 0, JSON.stringify(empty.events));
+check('model: efficiency is 0 not NaN when idle', empty.efficiency === 0, empty.efficiency);
+check('model: hourly empty, feeders empty, designs empty', !empty.hourly.length && !empty.designs.length, '');
+
+out.innerHTML += `\n<span class="${failed ? 'fail' : 'pass'}">${failed ? failed + ' FAILED' : 'ALL PASSED'}</span>\n`;
+</script>
+</body>
+</html>
