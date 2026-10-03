@@ -54,7 +54,10 @@ const Csf = (() => {
       files: { commserver: 0, hmi: 0, btf: 0, pattern: 0 },
     };
     if (machine.created[1]) {
-      machine.identity.created = `${machine.created[1].slice(0,4)}-${machine.created[1].slice(4,6)}-${machine.created[1].slice(6,8)} ${machine.created[2].slice(0,2)}:${machine.created[2].slice(2,4)}`;
+      // DD/MM/YYYY HH:MM, read from the CSF file name.
+      const d = machine.created[1], t = machine.created[2];
+      machine.identity.created =
+        `${d.slice(6, 8)}/${d.slice(4, 6)}/${d.slice(0, 4)} ${t.slice(0, 2)}:${t.slice(2, 4)}`;
     }
 
     const files = collect(zip);
@@ -63,71 +66,98 @@ const Csf = (() => {
     machine.files.btf = files.btfStartstop.length;
     machine.files.pattern = files.pattern.length;
 
+    // A failing part must cost us that part only — never the whole archive.
+    const events = [];
+    const warnings = [];
+    const warn = (part, err) => warnings.push({ part, message: (err && err.message) || String(err) });
+    const attempt = (label, part, fn) => {
+      try { fn(); } catch (err) { warn(label + ' (' + part + ')', err); }
+    };
+
     // ── export XML: the production record ──
     onStep('Reading production export', 0.05);
-    const events = [];
     const exportText = (await readAll(zip, files, 'export', (i, n) => onStep('Reading production export', 0.05 + 0.1 * i / n))).join('\n');
-    Decode.exportXml(exportText, events);
+    attempt('production export', 'export/*.xml', () => Decode.exportXml(exportText, events));
 
     // ── text logs: operator actions and settings ──
     onStep('Reading commserver logs', 0.15);
     const commText = (await readAll(zip, files, 'commserver', (i, n) => onStep('Reading commserver logs', 0.15 + 0.55 * i / n))).join('\n');
-    Decode.textLog(commText, events, 'commserver');
+    attempt('commserver logs', 'terminal/commserver/*', () => Decode.textLog(commText, events, 'commserver'));
 
     onStep('Reading terminal logs', 0.7);
     const hmiText = (await readAll(zip, files, 'hmi', (i, n) => onStep('Reading terminal logs', 0.7 + 0.1 * i / n))).join('\n');
-    if (hmiText) Decode.textLog(hmiText, events, 'hmi');
+    if (hmiText) attempt('terminal logs', 'terminal/hmi/*', () => Decode.textLog(hmiText, events, 'hmi'));
 
     // ── identity and settings dictionary ──
     onStep('Reading machine description', 0.8);
     for (const path of files.other) {
       const name = path.split('/').pop();
-      const text = await zip.file(path).async('string');
       try {
+        const text = await zip.file(path).async('string');
         if (name === 'machine_description.xml') machine.settings = Decode.machineDesc(text);
         else if (name === 'terminal_description.xml') machine.identity = Decode.terminalDesc(text);
         else if (name === 'manifest.json') machine.identity = { ...machine.identity, ...Decode.manifest(JSON.parse(text)) };
         else if (name.endsWith('.spc')) machine.spareParts = Decode.spareParts(text);
         else if (name.endsWith('.bshc')) machine.shiftRegimes = Decode.shiftRegimes(text);
-      } catch (e) { /* a part we do not understand must not stop the load */ }
+      } catch (err) {
+        warn(name, err);   // an unreadable part costs only that part
+      }
     }
 
     // ── Jacquard design: the density sets the operator enters ──
     onStep('Reading designs', 0.82);
     machine.designs = [];
     for (let i = 0; i < files.pattern.length; i++) {
-      const bytes = await zip.file(files.pattern[i]).async('uint8array');
-      const design = Decode.patternDesign(bytes);
-      if (design) machine.designs.push(design);
+      try {
+        const bytes = await zip.file(files.pattern[i]).async('uint8array');
+        const design = Decode.patternDesign(bytes);
+        if (design) machine.designs.push(design);
+      } catch (err) {
+        warn(files.pattern[i].split('/').pop(), err);
+      }
       onStep('Reading designs', 0.82 + 0.03 * (i + 1) / files.pattern.length);
     }
 
     // ── machine health: kernel log and one sampled memory trace ──
     onStep('Checking machine health', 0.85);
     for (const path of files.kernel.slice(-3)) {
-      Decode.kernelLog(await zip.file(path).async('string'), 'kernel').forEach(e => events.push(e));
+      try {
+        Decode.kernelLog(await zip.file(path).async('string'), 'kernel').forEach(e => events.push(e));
+      } catch (err) {
+        warn(path.split('/').pop(), err);
+      }
     }
     if (files.memory.length) {
-      const text = await zip.file(files.memory[0]).async('string');
-      machine.memory = Decode.memoryTrace(text);
+      try {
+        const text = await zip.file(files.memory[0]).async('string');
+        machine.memory = Decode.memoryTrace(text);
+      } catch (err) {
+        warn('memory trace', err);
+      }
     }
 
     // ── binary history: extends the timeline past what the export covers ──
     onStep('Decoding binary history', 0.85);
     let binary = { events: [], solved: false, coverage: 0, records: 0 };
     if (files.btfStartstop.length) {
-      const blobs = [];
-      for (let i = 0; i < files.btfStartstop.length; i++) {
-        blobs.push(await zip.file(files.btfStartstop[i]).async('uint8array'));
-        onStep('Decoding binary history', 0.85 + 0.14 * i / files.btfStartstop.length);
+      try {
+        const blobs = [];
+        for (let i = 0; i < files.btfStartstop.length; i++) {
+          blobs.push(await zip.file(files.btfStartstop[i]).async('uint8array'));
+          onStep('Decoding binary history', 0.85 + 0.14 * i / files.btfStartstop.length);
+        }
+        const raw = Decode.btfStartstopRaw(blobs);
+        binary = { ...Decode.btfToEvents(raw, knownSpan(events)), records: raw.length };
+        binary.files = files.btfStartstop.length;
+        events.push(...binary.events);
+      } catch (err) {
+        warn('binary history', err);   // optional: the archive stays usable
+        binary.failed = true;
       }
-      const raw = Decode.btfStartstopRaw(blobs);
-      binary = { ...Decode.btfToEvents(raw, knownSpan(events)), records: raw.length };
-      binary.files = files.btfStartstop.length;
-      events.push(...binary.events);
     }
     onStep('Building timeline', 0.99);
 
+    machine.warnings = warnings;
     return { machine, events, binary };
   }
 

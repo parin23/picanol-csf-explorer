@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="light">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -15,7 +15,7 @@
   <div class="spacer"></div>
   <nav id="tabs"></nav>
   <button id="export" class="ghost" disabled onclick="UI.exportCsv()" title="Export events as CSV (events include every decoded source)">⬇ CSV</button>
-  <button id="theme" class="ghost" onclick="toggleTheme()" title="Toggle theme (t)"><span id="theme-icon">🌙</span></button>
+  <button id="theme" class="ghost" onclick="toggleTheme()" title="Toggle theme (t)"><span id="theme-icon">☀️</span></button>
 </header>
 
 <main>
@@ -63,7 +63,7 @@ function toggleTheme() {
   localStorage.theme = t;
   themeIcon();
 }
-document.documentElement.dataset.theme = localStorage.theme || 'dark';
+document.documentElement.dataset.theme = localStorage.theme || 'light';
 themeIcon();
 
 // file input + drag and drop

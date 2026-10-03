@@ -11,21 +11,37 @@ const UI = (() => {
   let tab = 'timeline';
   let filter = 'all';
   let search = '';
+  let range = { from: '', to: '' };      // production date filter
+  let shiftSel = new Set();
+  const collapsed = new Set();
 
   const $ = id => document.getElementById(id);
   const esc = s => String(s ?? '').replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+  const dayOf = t => t.slice(0, 10);
+  const addDays = (day, n) => {
+    const t = Date.parse(day + 'T00:00:00');
+    return Number.isFinite(t) ? new Date(t + n * 86400000).toISOString().slice(0, 10) : '';
+  };
 
   // ─── formatting ───
-  const time = t => new Date(t).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  const date = t => new Date(t).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
-  const dayLabel = d => new Date(d + 'T00:00:00').toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  // Formatting that never prints NaN or Invalid Date, whatever the data holds.
+  // Resolved through the namespace at call time, so file load order can never
+  // bite us. Dates render DD/MM/YYYY on a 24-hour clock throughout.
+  const time = t => Decode.fmtTime(t);
+  const date = t => Decode.fmtDate(t);
+  const clock = t => Decode.fmtClock(t);
+  const dateTime = t => Decode.fmtDateTime(t);
+  const dayShort = v => Decode.fmtDayShort(v);
+  const dayFull = v => Decode.fmtDayFull(v);
+  const dayLabel = d => Decode.fmtDayLabel(d);
+
   function dur(s) {
     if (!Number.isFinite(s) || s <= 0) return '—';
     const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = Math.floor(s % 60);
     return h ? `${h}h ${String(m).padStart(2, '0')}m` : m ? `${m}m ${String(x).padStart(2, '0')}s` : `${x}s`;
   }
   const num = n => (Number.isFinite(n) ? n : 0).toLocaleString('en-GB', { maximumFractionDigits: 0 });
-  const pct = x => (x * 100).toFixed(1) + '%';
+  const pct = x => (Number.isFinite(x) ? (x * 100).toFixed(1) : '0.0') + '%';
 
   // ─── event → category (used by filters and colours) ───
   const CATS = [
@@ -69,11 +85,67 @@ const UI = (() => {
   }
 
   // Typing re-renders up to 1500 cards, so wait for a pause.
-  let searchTimer = null;
+  let searchTimer = null, rangeTimer = null;
   function searchInput(value) {
     clearTimeout(searchTimer);
     searchTimer = setTimeout(() => { search = value; render(); }, 160);
   }
+  function rangeChanged(patch) {
+    Object.assign(range, patch);
+    clearTimeout(rangeTimer);
+    rangeTimer = setTimeout(rebuild, 200);
+  }
+  function preset(days) {
+    if (!Number.isFinite(days)) return;
+    const last = DATA && DATA.model.last ? dayOf(DATA.model.last) : null;
+    if (!last) return;
+    range = days === 0 ? { from: '', to: '' } : { from: addDays(last, -(days - 1)), to: last };
+    rebuild();
+  }
+  function clearFilters() {
+    const last = DATA && DATA.model.last ? dayOf(DATA.model.last) : null;
+    range = last ? { from: addDays(last, -6), to: last } : { from: '', to: '' };
+    shiftSel.clear();
+    rebuild();
+  }
+  function rebuild() {
+    DATA.model = Model.build(DATA.events, DATA.machine.designs, { ...range, shifts: [...shiftSel] });
+    render();
+  }
+  function toggleShift(name) {
+    shiftSel.has(name) ? shiftSel.delete(name) : shiftSel.add(name);
+    rebuild();
+  }
+  // Every shift the machine stamped in this archive, in natural order.
+  function availableShifts() {
+    const found = new Set();
+    for (const e of DATA.events) if (e.shift && e.shift !== '?') found.add(e.shift);
+    return [...found].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  }
+
+  // A panel that can be folded away; state is remembered for the session.
+  function panel(id, title, body, note) {
+    const open = !collapsed.has(id);
+    let content = '';
+    if (open) {
+      try { content = body || ''; }
+      catch (err) {
+        console.error(id, err);
+        content = `<p class="panel-error"><b>${esc(title)} could not be shown</b><span>${esc((err && err.message) || String(err))}</span></p>`;
+      }
+    }
+    return `<section class="panel${open ? '' : ' folded'}">
+      <h2><button class="fold" data-fold="${id}" aria-expanded="${open}">${esc(title)}<span class="chev">${open ? '▾' : '▸'}</span></button>${note ? `<span class="small">${note}</span>` : ''}</h2>
+      ${content}</section>`;
+  }
+  document.addEventListener('click', e => {
+    const f = e.target.closest && e.target.closest('[data-fold]');
+    if (f) {
+      const id = f.dataset.fold;
+      collapsed.has(id) ? collapsed.delete(id) : collapsed.add(id);
+      render();
+    }
+  });
 
   // Click a table header to sort. Kept deliberately small: numbers, then text.
   let sortBy = null, sortDir = 1;
@@ -96,9 +168,18 @@ const UI = (() => {
   }
   document.addEventListener('click', e => {
     const t = e.target.closest && e.target.closest('th[data-sort]');
-    if (t) sortToggle(t.dataset.sort);
+    if (t) return sortToggle(t.dataset.sort);
+    const p = e.target.closest && e.target.closest('[data-preset]');
+    if (p) { preset(+p.dataset.preset); return; }
+    const s = e.target.closest && e.target.closest('[data-shift]');
+    if (s) return s.dataset.shift === '__all' ? (shiftSel.clear(), rebuild()) : toggleShift(s.dataset.shift);
+    const c = e.target.closest && e.target.closest('[data-clear]');
+    if (c) return clearFilters();
   });
-
+  document.addEventListener('change', e => {
+    if (e.target.id === 'range-from') rangeChanged({ from: e.target.value });
+    if (e.target.id === 'range-to') rangeChanged({ to: e.target.value });
+  });
   function setStats(m, machine) {
     $('stats').innerHTML = [
       ['Events', num(m.events.length)],
@@ -218,6 +299,42 @@ const UI = (() => {
   }
 
   // ─── production ───
+  function rangeBar(m) {
+    const first = m.first ? dayOf(m.first) : '';
+    const last = m.last ? dayOf(m.last) : '';
+    const from = range.from || first, to = range.to || last;
+    const days = from && to ? Math.round((Date.parse(to) - Date.parse(from)) / 86400000) + 1 : 0;
+    const filtered = range.from || range.to;
+    const presetBtn = (label, days_, on) => `<button class="preset${on ? ' active' : ''}" data-preset="${days_}">${label}</button>`;
+    const wholeOn = !filtered;
+    return `<div class="rangebar">
+      <span class="range-label">Period</span>
+      <input type="date" id="range-from" value="${from}" min="${first}" max="${last}">
+      <span class="dash">→</span>
+      <input type="date" id="range-to" value="${to}" min="${first}" max="${last}">
+      <span class="presets">
+        ${presetBtn('Whole range', 0, wholeOn)}
+        ${presetBtn('7 days', 7, range.to === last && range.from === addDays(last, -6))}
+        ${presetBtn('30 days', 30, range.to === last && range.from === addDays(last, -29))}
+        ${presetBtn('90 days', 90, range.to === last && range.from === addDays(last, -89))}
+      </span>
+      <span class="range-info">${days} days · ${num(m.stopCount)} stops · ${num(m.picks)} picks</span>
+      ${filtered || shiftSel.size ? '<button class="preset clear" data-clear="1">Reset</button>' : ''}
+    </div>${shiftChips()}`;
+  }
+
+  function shiftChips() {
+    const all = availableShifts();
+    if (all.length < 2) return '';
+    const on = n => shiftSel.has(n);
+    return `<div class="shiftbar">
+      <span class="range-label">Shifts</span>
+      <button class="preset${shiftSel.size ? '' : ' active'}" data-shift="__all">All</button>
+      ${all.map(n => `<button class="preset${on(n) ? ' active' : ''}" data-shift="${esc(n)}">${esc(n)}</button>`).join('')}
+      ${shiftSel.size ? `<span class="range-info">showing ${[...shiftSel].sort().join(', ')}</span>` : ''}
+    </div>`;
+  }
+
   function renderProduction(m, machine) {
     const total = m.runSec + m.byReason.reduce((s, r) => s + r.sec, 0);
     const kpis = [
@@ -232,13 +349,8 @@ const UI = (() => {
       ['Binary stops', num(m.binaryStops)],
     ].map(([k, v]) => `<div class="kpi"><span>${k}</span><b>${v}</b></div>`).join('');
 
-    const max = Math.max(1, ...m.byReason.map(r => r.sec));
-    const bars = m.byReason.map(r => `
-      <div class="bar-row">
-        <span class="bar-label">${esc(r.label)}</span>
-        <span class="bar-track"><i style="width:${(r.sec / max * 100).toFixed(1)}%"></i></span>
-        <span class="bar-val">${dur(r.sec)} · ${r.count}×</span>
-      </div>`).join('');
+    const pareto = m.byReason;
+    const bars = pareto.length ? paretoChart(pareto) : '<p class="empty">No stop data.</p>';
 
     const feeders = rows(m.feeders, f => `
       <tr><td><b>${esc(f.channel)}</b></td><td>${f.stops}</td><td>${dur(f.sec)}</td>
@@ -248,40 +360,214 @@ const UI = (() => {
 
     const dayRows = m.days.filter(d => d.run || d.stops).slice(0, 60);
     const days = rows(dayRows, d => `
-      <tr><td>${d.day}</td><td>${dur(d.run)}</td><td>${d.stops}</td><td>${num(d.picks)}</td><td>${num(Math.round(d.metres))}</td></tr>`, 'day');
-
-    const shifts = rows(m.shifts.slice(-60), s => `
-      <tr><td>${esc(s.name)}</td><td>${s.start.slice(0, 16).replace('T', ' ')}</td><td>${dur(s.run)}</td>
-      <td>${num(s.picks)}</td><td>${num(Math.round(s.metres))}</td><td>${s.stops}</td></tr>`, 'start');
+      <tr><td>${dayFull(d.day)}</td><td>${dur(d.run)}</td><td>${d.stops}</td><td>${num(d.picks)}</td><td>${num(Math.round(d.metres))}</td></tr>`, 'day');
 
     const articles = rows(m.articles.slice(-60), a => `
-      <tr><td>${esc(a.name || '—')}</td><td>${a.start.slice(0, 16).replace('T', ' ')}</td><td>${dur(a.sec)}</td>
+      <tr><td>${esc(a.name || '—')}</td><td>${dateTime(a.start)}</td><td>${dur(a.sec)}</td>
       <td>${num(a.picks)}</td><td>${num(Math.round(a.metres))}</td><td>${a.stops}</td></tr>`, 'start').split('<tr>').reverse().join('<tr>');
 
     const sessions = rows(m.sessions.slice(-40), s => `
-      <tr><td>${s.start.slice(0, 16).replace('T', ' ')}</td><td>${s.end ? s.end.slice(11, 16) : '—'}</td>
+      <tr><td>${dateTime(s.start)}</td><td>${s.end ? clock(s.end) : '—'}</td>
       <td>${s.sec == null ? 'open' : dur(s.sec)}</td><td class="mono">${esc((s.key || '').slice(0, 8))}</td></tr>`, 'start');
 
+    const shiftRows = m.shiftTotals.map(s => `
+      <tr><td><b>${esc(s.name)}</b></td><td>${pct(s.efficiency)}</td><td>${dur(s.run)}</td>
+      <td>${dur(s.stop)}</td><td>${num(s.picks)}</td><td>${num(Math.round(s.metres))}</td>
+      <td>${s.stops}</td><td>${num(Math.round(s.picksPerHour))}</td></tr>`).join('');
+
+    const ranked = m.articles.filter(a => a.picks > 0).sort((a, b) => b.picks - a.picks);
+
     return `
-      <section class="panel"><h2>Overview</h2><div class="kpis">${kpis}</div></section>
+      ${rangeBar(m)}
+      ${warningBanner(machine)}
+      ${panel('overview', 'Overview', `<div class="kpis">${kpis}</div>`)}
       ${binaryNote(machine)}
-      <section class="panel"><h2>Efficiency by hour</h2>${hourlyChart(m.hourly)}
-        <p class="small">Bars show running minutes in each hour. Dots mark hours with stops.</p></section>
-      <section class="panel"><h2>Downtime by reason</h2>${bars || '<p class="empty">No stop data.</p>'}</section>
-      <section class="panel"><h2>Stops per weft feeder</h2>
-        ${m.feeders.length ? `<table><thead><tr>${th('Channel', 'channel')}${th('Stops', 'stops')}${th('Downtime', 'sec')}<th>Avg</th>${th('Picks lost', 'picks')}<th>Top reasons</th></tr></thead><tbody>${feeders}</tbody></table>`
-                  : '<p class="empty">No channel-attributed stops in this export.</p>'}
-        <p class="small">Stops without a channel (beam, hand, bobbin) are not listed here. Click a header to sort.</p></section>
-      <section class="panel"><h2>Design density sets <span class="small">pick variation from the Jacquard pattern</span></h2>
-        ${designTable(m.designs)}</section>
-      <section class="panel"><h2>Production per day</h2>
-        <table><thead><tr>${th('Day', 'day')}${th('Running', 'run')}${th('Stops', 'stops')}${th('Picks', 'picks')}${th('Metres', 'metres')}</tr></thead><tbody>${days}</tbody></table></section>
-      <section class="panel"><h2>Shifts</h2>
-        <table><thead><tr>${th('Shift', 'name')}${th('Start', 'start')}${th('Running', 'run')}${th('Picks', 'picks')}${th('Metres', 'metres')}${th('Stops', 'stops')}</tr></thead><tbody>${shifts}</tbody></table></section>
-      <section class="panel"><h2>Articles</h2>
-        <table><thead><tr>${th('Article', 'name')}${th('Start', 'start')}${th('Duration', 'sec')}${th('Picks', 'picks')}${th('Metres', 'metres')}${th('Stops', 'stops')}</tr></thead><tbody>${articles}</tbody></table></section>
-      <section class="panel"><h2>Operator sessions</h2>
-        <table><thead><tr>${th('Login', 'start')}<th>Logout</th>${th('Duration', 'sec')}<th>Session</th></tr></thead><tbody>${sessions}</tbody></table></section>`;
+      ${panel('stats', 'Stop statistics', stopStats(m), 'how long stops last and how long the machine runs between them')}
+      ${panel('pareto', 'Downtime by reason', bars || '<p class="empty">No stop data.</p>', 'bars show duration, the line shows the cumulative share')}
+      ${panel('heat', 'Stops by hour of day', hourHeatmap(m), 'where in the day the problems cluster')}
+      ${panel('weekday', 'Stops by weekday', weekdayChart(m))}
+      ${panel('gantt', 'Run and stop timeline', ganttChart(m), 'green runs, red stops — a dashed day is a fragmented day')}
+      ${panel('throughput', 'Output per hour', throughputChart(m))}
+      ${panel('feeder', 'Stops per weft feeder', m.feeders.length
+        ? `<table><thead><tr>${th('Channel', 'channel')}${th('Stops', 'stops')}${th('Downtime', 'sec')}<th>Avg</th>${th('Picks lost', 'picks')}<th>Top reasons</th></tr></thead><tbody>${feeders}</tbody></table>
+           ${feederMatrix(m)}`
+        : '<p class="empty">No channel-attributed stops in this export.</p>', 'click a header to sort')}
+      ${panel('shifts', 'Shift comparison', shiftRows
+        ? `<table><thead><tr>${th('Shift', 'name')}${th('Efficiency', 'efficiency')}${th('Running', 'run')}<th>Stopped</th>${th('Picks', 'picks')}${th('Metres', 'metres')}${th('Stops', 'stops')}${th('Picks/h', 'picksPerHour')}</tr></thead><tbody>${shiftRows}</tbody></table>
+           <p class="small">${pct(m.shiftCoverage)} of woven picks carry a shift label; the rest predate the first recorded shift.</p>`
+        : '<p class="empty">No shift information in this export.</p>')}
+      ${panel('warp', 'Warp stops', warpPanel(m))}
+      ${panel('articles', 'Articles', ranked.length
+        ? articleRanking(ranked) + `<table><thead><tr>${th('Article', 'name')}${th('Start', 'start')}${th('Duration', 'sec')}${th('Running', 'runSec')}${th('Efficiency', 'efficiency')}${th('Picks', 'picks')}${th('Metres', 'metres')}${th('Stops', 'stops')}</tr></thead><tbody>${articles}</tbody></table>`
+        : '<p class="empty">No articles in this period.</p>')}
+      ${panel('designs', 'Design density sets', designTable(m.designs), 'pick variation from the Jacquard pattern')}
+      ${panel('days', 'Production per day',
+        `<table><thead><tr>${th('Day', 'day')}${th('Running', 'run')}${th('Stops', 'stops')}${th('Picks', 'picks')}${th('Metres', 'metres')}</tr></thead><tbody>${days}</tbody></table>`)}
+      ${panel('sessions', 'Operator sessions',
+        `<table><thead><tr>${th('Login', 'start')}<th>Logout</th>${th('Duration', 'sec')}<th>Session</th></tr></thead><tbody>${sessions}</tbody></table>`)}`;
+  }
+
+  // ─── the individual panels ───
+
+  function stopStats(m) {
+    const s = m.stats;
+    if (!s.stops) return '<p class="empty">No stops in this period.</p>';
+    const longest = s.longestStop
+      ? `${esc(s.longestStop.label)} — ${dur(s.longestStop.sec)} (${dateTime(s.longestStop.t)})`
+      : '—';
+    const cards = [
+      ['MTTR (mean stop)', dur(s.mttr)],
+      ['Median stop', dur(s.medianStop)],
+      ['95th percentile stop', dur(s.p95Stop)],
+      ['MTBF (mean run)', dur(s.mtbf)],
+      ['Mean run', dur(s.meanRun)],
+      ['Longest run', dur(s.longestRun)],
+      ['Picks per stop', num(s.picksPerStop)],
+    ].map(([k, v]) => `<div class="kpi small"><span>${k}</span><b>${v}</b></div>`).join('');
+    const max = Math.max(1, ...m.histogram.map(h => h.count));
+    const bars = m.histogram.map(h => `
+      <div class="bar-row">
+        <span class="bar-label">${h.label}</span>
+        <span class="bar-track"><i style="width:${(h.count / max * 100).toFixed(1)}%"></i></span>
+        <span class="bar-val">${num(h.count)}</span>
+      </div>`).join('');
+    return `<div class="kpis">${cards}</div>
+      <p class="small">Longest stop: ${longest}</p>
+      <h3>Stop duration distribution</h3>${bars}`;
+  }
+
+  function hourHeatmap(m) {
+    const { reasons, hours, cell, max } = m.hourMatrix;
+    if (!reasons.length || !hours.some(h => h.stops)) return '<p class="empty">No stops in this period.</p>';
+    const head = `<tr><th></th>${hours.map(h => `<th class="hr">${h.hour}</th>`).join('')}<th class="hr">all</th></tr>`;
+    const body = reasons.map(r => {
+      const cells = hours.map(h => {
+        const v = cell(h.hour, r);
+        const a = v ? 0.15 + 0.85 * (v / max) : 0;
+        return `<td style="background:${v ? `rgba(239,68,68,${a.toFixed(2)})` : 'var(--surface2)'}" title="${h.hour}:00 · ${esc(r)} · ${v} stop${v === 1 ? '' : 's'}">${v || ''}</td>`;
+      }).join('');
+      const tot = hours.reduce((s, h) => s + cell(h.hour, r), 0);
+      return `<tr><th class="rl">${esc(r)}</th>${cells}<td class="tot">${tot}</td></tr>`;
+    }).join('');
+    const foot = `<tr><th class="rl">all</th>${hours.map(h => `<td class="tot">${h.stops || ''}</td>`).join('')}<td class="tot">${num(hours.reduce((s, h) => s + h.stops, 0))}</td></tr>`;
+    return `<table class="heat"><thead>${head}</thead><tbody>${body}${foot}</tbody></table>
+      <p class="small">Darker means more stops. Hover any cell for the exact count.</p>`;
+  }
+
+  function weekdayChart(m) {
+    const names = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    const max = Math.max(1, ...m.weekday.map(w => w.stops));
+    return `<div class="weekdays">${m.weekday.map(w => `
+      <div class="wd">
+        <span class="wd-bar" style="height:${(w.stops / max * 100).toFixed(1)}%"><i title="${w.stops} stops"></i></span>
+        <b>${names[w.day]}</b><small>${w.stops} stops</small><small>${num(w.picks)} picks</small>
+      </div>`).join('')}</div>`;
+  }
+
+  function ganttChart(m) {
+    if (!m.gantt.length) return '<p class="empty">No run data in this period.</p>';
+    const H = 16, gap = 5;
+    // The model already coalesces and caps segments per day; 60 days is more
+    // than anyone scrolls.
+    const MAX_DAYS = 60;
+    const shown = m.gantt.slice(-MAX_DAYS);
+    const H2 = shown.length * (H + gap) + 26;
+    const rows = shown.map((g, i) => {
+      const y = i * (H + gap) + 18;
+      const segs = g.segs.map(s => {
+        const x = (s.from / 86400 * 1000).toFixed(1);
+        const w = Math.max(0.6, ((s.to - s.from) / 86400 * 1000)).toFixed(1);
+        const fill = s.kind === 'run' ? 'var(--green)' : 'var(--red)';
+        return `<rect x="${x}" y="${y}" width="${w}" height="${H}" fill="${fill}" rx="1" opacity="${s.kind === 'run' ? 0.85 : 0.95}">
+          <title>${dayFull(g.day)} ${fmtClock(s.from)}–${fmtClock(s.to)} · ${s.kind === 'run' ? 'running' : 'stopped: ' + esc(s.label)}</title></rect>`;
+      }).join('');
+      const dropped = g.dropped || 0;
+      return `${segs}<text x="0" y="${y + H - 3}" fill="var(--muted)" font-size="7">${dayShort(g.day)}${dropped > 0 ? ' +' + dropped : ''}</text>`;
+    }).join('');
+    const grid = [0, 6, 12, 18, 24].map(h => `<line x1="${h / 24 * 1000}" x2="${h / 24 * 1000}" y1="10" y2="${H2 - 8}" stroke="var(--border)" stroke-width="0.5"/>
+      <text x="${h / 24 * 1000 + 2}" y="9" fill="var(--muted)" font-size="7">${String(h).padStart(2, '0')}:00</text>`).join('');
+    return `<svg viewBox="0 0 1000 ${H2}" class="chart gantt">${grid}${rows}</svg>` +
+      (m.gantt.length > shown.length ? `<p class="small">Showing the newest ${shown.length} of ${m.gantt.length} days.</p>` : '');
+  }
+  const fmtClock = s => `${String(Math.floor(s / 3600) % 24).padStart(2, '0')}:${String(Math.floor(s / 60) % 60).padStart(2, '0')}`;
+
+  function throughputChart(m) {
+    if (!m.throughput.length) return '<p class="empty">No production in this period.</p>';
+    const W = 1000, H = 150, pad = 24;
+    const n = m.throughput.length;
+    const bw = Math.max(1.5, (W - pad * 2) / n);
+    const maxP = Math.max(1, ...m.throughput.map(h => h.picksPerHour));
+    const bars = m.throughput.map((h, i) => {
+      const x = pad + i * bw;
+      const bh = (h.picksPerHour / maxP) * (H - 40);
+      const tip = `${dateTime(h.t)} · ${num(h.picksPerHour)} picks · ${num(Math.round(h.metresPerHour))} m · ${h.stops} stops`;
+      return `<g><title>${esc(tip)}</title><rect x="${x.toFixed(2)}" y="${(H - 22 - bh).toFixed(2)}" width="${(bw - 0.6).toFixed(2)}" height="${Math.max(0.5, bh).toFixed(2)}" fill="var(--amber)" rx="1"></rect>
+        <text x="${(x + bw / 2).toFixed(2)}" y="${(H - 12).toFixed(2)}" fill="var(--muted)" font-size="6" text-anchor="middle" transform="rotate(-60 ${(x + bw / 2).toFixed(2)} ${(H - 12).toFixed(2)})">${dayShort(h.t.slice(0, 10))}</text></g>`;
+    }).join('');
+    return `<svg viewBox="0 0 ${W} ${H}" class="chart">${bars}
+      <text x="${pad}" y="10" fill="var(--muted)" font-size="8">picks per hour — peak ${num(maxP)}</text></svg>`;
+  }
+
+  function paretoChart(rows) {
+    const W = 1000, H = 210, padL = 46, padR = 40, padB = 66, padT = 14;
+    const n = rows.length;
+    const maxSec = Math.max(1, ...rows.map(r => r.sec));
+    const bw = (W - padL - padR) / n;
+    const plotH = H - padB - padT;
+    const bars = rows.map((r, i) => {
+      const h = (r.sec / maxSec) * plotH;
+      const x = padL + i * bw;
+      const tip = `${esc(r.label)} · ${dur(r.sec)} · ${r.count} stops · ${pct(r.cumulative)} of downtime`;
+      return `<g><title>${esc(tip)}</title>
+        <rect x="${(x + bw * 0.15).toFixed(1)}" y="${(padT + plotH - h).toFixed(1)}" width="${(bw * 0.7).toFixed(1)}" height="${Math.max(0.5, h).toFixed(1)}" fill="var(--red)" opacity="0.8" rx="2"></rect>
+        <text x="${(x + bw / 2).toFixed(1)}" y="${H - padB + 12}" fill="var(--muted)" font-size="8" text-anchor="end" transform="rotate(-40 ${(x + bw / 2).toFixed(1)} ${H - padB + 12})">${esc(r.label)}</text>
+        <text x="${(x + bw / 2).toFixed(1)}" y="${(padT + plotH - h - 3).toFixed(1)}" fill="var(--dim)" font-size="7" text-anchor="middle">${dur(r.sec)}</text>
+      </g>`;
+    }).join('');
+    const pts = rows.map((r, i) => `${(padL + i * bw + bw / 2).toFixed(1)},${(padT + plotH - r.cumulative * plotH).toFixed(1)}`).join(' ');
+    const line = `<polyline points="${pts}" fill="none" stroke="var(--amber)" stroke-width="1.5"></polyline>` +
+      rows.map((r, i) => `<circle cx="${(padL + i * bw + bw / 2).toFixed(1)}" cy="${(padT + plotH - r.cumulative * plotH).toFixed(1)}" r="2.5" fill="var(--amber)"><title>${esc(r.label)}: ${pct(r.cumulative)} cumulative</title></circle>`).join('');
+    const grid = [0, 0.25, 0.5, 0.75, 1].map(f => {
+      const y = padT + plotH - f * plotH;
+      return `<line x1="${padL}" x2="${W - padR}" y1="${y}" y2="${y}" stroke="var(--border)" stroke-width="0.5"/>
+        <text x="${padL - 6}" y="${y + 3}" text-anchor="end" fill="var(--muted)" font-size="8">${f * 100}%</text>`;
+    }).join('');
+    return `<svg viewBox="0 0 ${W} ${H}" class="chart pareto">${grid}${bars}${line}</svg>`;
+  }
+
+  function feederMatrix(m) {
+    const { reasons, max, cell } = m.feederMatrix;
+    const channels = m.feederMatrix.channels;
+    if (!channels.length || !reasons.length) return '';
+    const head = `<tr><th class="rl"></th>${reasons.slice(0, 8).map(r => `<th class="rl2">${esc(r)}</th>`).join('')}</tr>`;
+    const body = channels.map(ch => `<tr><th class="rl">ch ${esc(ch)}</th>` +
+      reasons.slice(0, 8).map(r => {
+        const v = cell(ch, r);
+        const a = v ? 0.15 + 0.85 * (v / max) : 0;
+        return `<td style="background:${v ? `rgba(239,68,68,${a.toFixed(2)})` : 'var(--surface2)'}" title="Channel ${esc(ch)} · ${esc(r)} · ${v}">${v || ''}</td>`;
+      }).join('') + '</tr>').join('');
+    return `<h3>Which feeder fails for what</h3>
+      <table class="heat small"><thead>${head}</thead><tbody>${body}</tbody></table>`;
+  }
+
+  function warpPanel(m) {
+    const w = m.warp;
+    const items = [['Beam change', w.beam], ['Waste yarn left', w.wasteLeft], ['Waste yarn right', w.wasteRight], ['Other warp', w.other]];
+    if (!items.some(([, v]) => v)) return '<p class="empty">No warp stops in this period.</p>';
+    const total = items.reduce((a, [, v]) => a + v, 0);
+    return `<div class="kpis">${items.map(([k, v]) => `
+        <div class="kpi small"><span>${k}</span><b>${num(v)}</b><small>${pct(v / total)}</small></div>`).join('')}
+        <div class="kpi small"><span>Total warp downtime</span><b>${dur(w.sec)}</b></div></div>
+      <p class="small">Beam changes are planned work; waste-yarn stops are faults. ${pct(w.wasteLeft + w.wasteRight)} of warp stops are waste yarn.</p>`;
+  }
+
+  function articleRanking(ranked) {
+    const top = ranked.slice(0, 10);
+    const max = Math.max(1, ...top.map(a => a.picks));
+    return `<h3>Top articles by output</h3><div class="rank">${top.map(a => `
+      <div class="rank-row"><span class="rank-label">${esc(a.name || '—')}</span>
+        <span class="bar-track"><i style="width:${(a.picks / max * 100).toFixed(1)}%"></i></span>
+        <span class="bar-val">${num(a.picks)} · ${pct(a.efficiency)}</span></div>`).join('')}</div>`;
   }
 
   // Hand-drawn SVG: one bar per hour of running time, dots for stop hours.
@@ -295,7 +581,7 @@ const UI = (() => {
       const hh = Math.min(60, h.run / 60);
       const bh = (hh / 60) * (H - 30);
       const colour = h.efficiency >= 0.8 ? 'var(--green)' : h.efficiency >= 0.5 ? 'var(--amber)' : 'var(--red)';
-      const tip = `${h.t.slice(0, 13)} · ${hh.toFixed(0)} min running · ${h.stops} stops · ${num(h.picks)} picks`;
+      const tip = `${dateTime(h.t)} · ${hh.toFixed(0)} min running · ${h.stops} stops · ${num(h.picks)} picks`;
       return `<g><title>${esc(tip)}</title>
         <rect x="${x.toFixed(2)}" y="${(H - 20 - bh).toFixed(2)}" width="${(bw - 0.6).toFixed(2)}" height="${Math.max(0.5, bh).toFixed(2)}" fill="${colour}" rx="1">
         </rect>${h.stops ? `<circle cx="${(x + bw / 2).toFixed(2)}" cy="${(H - 22 - bh).toFixed(2)}" r="1.1" fill="var(--text)"></circle>` : ''}</g>`;
@@ -305,8 +591,8 @@ const UI = (() => {
       return `<line x1="${pad}" x2="${W - pad}" y1="${y}" y2="${y}" stroke="var(--border)" stroke-width="0.5"></line>
               <text x="${pad - 5}" y="${y + 3}" text-anchor="end" fill="var(--muted)" font-size="9">${v}m</text>`;
     }).join('');
-    const span = `${hours[0].t.slice(5, 10)} → ${hours[n - 1].t.slice(5, 10)}`;
-    return `<svg viewBox="0 0 ${W} ${H}" class="chart" preserveAspectRatio="none" role="img" aria-label="Efficiency by hour">${ticks}${bars}
+    const span = `${dayShort(hours[0].t.slice(0, 10))} → ${dayShort(hours[n - 1].t.slice(0, 10))}`;
+    return `<svg viewBox="0 0 ${W} ${H}" class="chart" role="img" aria-label="Efficiency by hour">${ticks}${bars}
       <text x="${pad}" y="${H - 6}" fill="var(--muted)" font-size="9">${span}</text></svg>`;
   }
 
@@ -332,7 +618,9 @@ const UI = (() => {
 
   // ─── machine ───
   function renderMachine(machine, model) {
+    machine = machine || {};
     const id = machine.identity || {};
+    const mf = machine.files || {};
     const info = [
       ['Serial', machine.serial || '—'], ['CSF file', machine.name],
       ['Created', machine.identity.created || '—'], ['Software', id.software || id.version || '—'],
@@ -341,23 +629,24 @@ const UI = (() => {
     ].map(([k, v]) => `<tr><th>${k}</th><td class="mono">${esc(v)}</td></tr>`).join('');
 
     const groups = new Map();
-    for (const s of machine.settings) {
+    for (const s of (Array.isArray(machine.settings) ? machine.settings : [])) {
+      if (!s || typeof s !== 'object') continue;
       if (!groups.has(s.group)) groups.set(s.group, []);
       groups.get(s.group).push(s);
     }
     let settings = '';
     for (const [g, items] of groups) {
       settings += `<details><summary>${esc(g || 'other')} — ${items.length} settings</summary><table><tbody>` +
-        items.map(s => `<tr><td>${s.code}</td><td>${esc(s.name)}</td><td>${esc(s.enumName || s.value)}</td></tr>`).join('') +
+        items.filter(s => s && typeof s === 'object').map(s => `<tr><td>${esc(s.code ?? '—')}</td><td>${esc(s.name || '—')}</td><td>${esc(s.enumName || s.value || '—')}</td></tr>`).join('') +
         `</tbody></table></details>`;
     }
 
-    const parts = machine.spareParts.length
-      ? `<table><tbody>${machine.spareParts.map(p => `<tr><td class="mono">${esc(p.id)}</td><td>${esc(p.name)}</td></tr>`).join('')}</tbody></table>`
+    const parts = (Array.isArray(machine.spareParts) && machine.spareParts.length)
+      ? `<table><tbody>${machine.spareParts.filter(Boolean).map(p => `<tr><td class="mono">${esc(p.id)}</td><td>${esc(p.name)}</td></tr>`).join('')}</tbody></table>`
       : '<p class="empty">None.</p>';
 
-    const regimes = machine.shiftRegimes.length
-      ? `<table><tbody>${machine.shiftRegimes.map(r => `<tr><td>${esc(r.uid)}</td><td>${esc(r.day)}</td><td>${esc(r.hours)}</td></tr>`).join('')}</tbody></table>`
+    const regimes = (Array.isArray(machine.shiftRegimes) && machine.shiftRegimes.length)
+      ? `<table><tbody>${machine.shiftRegimes.filter(Boolean).map(r => `<tr><td>${esc(r.uid)}</td><td>${esc(r.day)}</td><td>${esc(r.hours)}</td></tr>`).join('')}</tbody></table>`
       : '<p class="empty">None.</p>';
 
     const mem = machine.memory;
@@ -373,16 +662,17 @@ const UI = (() => {
 
     const health = model.health.length
       ? `<table><thead><tr><th>When</th><th>Level</th><th>Event</th><th>Detail</th></tr></thead><tbody>` +
-        model.health.slice(0, 40).map(h => `<tr><td class="mono">${h.t.slice(0, 16).replace('T', ' ')}</td>
+        model.health.slice(0, 40).map(h => `<tr><td class="mono">${dateTime(h.t)}</td>
           <td class="small">${esc(h.level)}</td><td>${esc(h.title)}</td><td class="small">${esc(h.detail)}</td></tr>`).join('') +
         '</tbody></table>'
       : '<p class="empty">No kernel faults, OOMs or thermal events in the kernel log.</p>';
 
     return `
+      ${warningBanner(machine)}
       <section class="panel"><h2>Identity</h2><table class="kv"><tbody>${info}</tbody></table>
-        <p class="small">${num(model.events.length)} events · ${num(machine.files.commserver)} commserver logs ·
-        ${num(machine.files.hmi)} terminal logs · ${num(machine.files.btf)} binary history files ·
-        ${num(machine.files.pattern)} pattern records</p></section>
+        <p class="small">${num(model.events.length)} events · ${num(mf.commserver)} commserver logs ·
+        ${num(mf.hmi)} terminal logs · ${num(mf.btf)} binary history files ·
+        ${num(mf.pattern)} pattern records</p></section>
       <section class="panel"><h2>Machine health</h2>
         <div class="split">${health}<div>${memory}</div></div></section>
       <section class="panel"><h2>Settings dictionary <span class="small">${machine.settings.length} items</span></h2>${settings || '<p class="empty">None.</p>'}</section>
@@ -390,14 +680,27 @@ const UI = (() => {
       <section class="panel"><h2>Spare parts</h2>${parts}</section>`;
   }
 
+  // Anything that failed to decode is reported, never swallowed silently.
+  function warningBanner(machine) {
+    const w = (machine && Array.isArray(machine.warnings)) ? machine.warnings.filter(x => x && x.part) : [];
+    if (!w.length) return '';
+    const groups = new Map();
+    for (const x of w) groups.set(x.part, x.message);
+    return `<section class="panel warn">
+      <h2>Partly decoded <span class="small">${groups.size} part${groups.size === 1 ? '' : 's'} could not be read — everything else is complete</span></h2>
+      <ul>${[...groups].map(([part, msg]) => `<li><b>${esc(part)}</b><span>${esc(msg)}</span></li>`).join('')}</ul>
+    </section>`;
+  }
+
   // ─── diagnostics: what the binary history contains ───
   function renderDiagnostics(m, machine) {
+    machine = machine || {};
     const b = machine.binary || {};
     const f = machine.files || {};
     const n = v => num(typeof v === 'number' ? v : undefined);
     const rows = [
       ['history/startstop', n(f.btf), n(b.records), 'stop reason codes decoded (big-endian mssg_nr), clock 3906.25 ticks/s'],
-      ['history/pattern', n(f.pattern), (machine.designs || []).length, 'design index tables decoded — PickDensity, Speed, Color'],
+      ['history/pattern', n(f.pattern), (Array.isArray(machine.designs) ? machine.designs : []).length, 'design index tables decoded — PickDensity, Speed, Color'],
       ['history/hour', '—', 'not decoded', 'framing and clock known; field semantics unproven, so not shown as numbers'],
       ['history/fillingstop', '—', 'not decoded', 'needs the same field mapping as history/hour'],
       ['history/insertionlog', '—', 'not decoded', 'per-pick insertion log — richest dataset, largest effort'],
@@ -426,7 +729,7 @@ const UI = (() => {
     if (!DATA) return;
     const rows = [['timestamp', 'kind', 'category', 'title', 'detail', 'mssg', 'channel', 'picks', 'metres', 'shift', 'source']];
     for (const e of DATA.model.events) {
-      rows.push([e.t, e.kind, catOf(e), e.title || e.label || '', (e.detail || '').replace(/<[^>]+>/g, ''),
+      rows.push([dateTime(e.t), e.kind, catOf(e), e.title || e.label || '', (e.detail || '').replace(/<[^>]+>/g, ''),
         e.mssg || '', e.channel || '', e.picks || '', e.length || '', e.shift || '', e.src || '']);
     }
     download(`${DATA.machine.serial || 'csf'}-events.csv`, rows.map(r => r.join(',')).join('\n'), 'text/csv');
@@ -435,19 +738,35 @@ const UI = (() => {
   // ─── render ───
   const VIEWS = ['timeline', 'production', 'machine', 'diagnostics'];
 
+  // A panel that renders must never take the view down with it: if one throws,
+  // show the failure in place and keep every other panel.
+  function safe(label, fn, emptyText) {
+    try {
+      const html = fn();
+      return html || `<p class="empty">${esc(emptyText || 'Nothing to show.')}</p>`;
+    } catch (err) {
+      console.error(label, err);
+      return `<p class="panel-error"><b>${esc(label)} could not be shown</b><span>${esc((err && err.message) || String(err))}</span></p>`;
+    }
+  }
+
   function render() {
-    shell();
+    try { shell(); } catch (err) { console.error('shell', err); }
     const m = DATA.model;
     $('export').disabled = false;
     $('stats').style.display = '';
-    setStats(m, DATA.machine);
+    try { setStats(m, DATA.machine); } catch (err) { console.error('stats', err); }
     $('search').style.display = tab === 'timeline' ? '' : 'none';
     $('filters').style.display = tab === 'timeline' ? '' : 'none';
     for (const v of VIEWS) $('view-' + v).style.display = v === tab ? '' : 'none';
-    if (tab === 'timeline') $('view-timeline').innerHTML = renderTimeline(m);
-    if (tab === 'production') $('view-production').innerHTML = renderProduction(m, DATA.machine);
-    if (tab === 'machine') $('view-machine').innerHTML = renderMachine(DATA.machine, m);
-    if (tab === 'diagnostics') $('view-diagnostics').innerHTML = renderDiagnostics(m, DATA.machine);
+    try {
+      if (tab === 'timeline') $('view-timeline').innerHTML = safe('Timeline', () => renderTimeline(m), 'No events in this period.');
+      if (tab === 'production') $('view-production').innerHTML = safe('Production', () => renderProduction(m, DATA.machine), 'Nothing to show.');
+      if (tab === 'machine') $('view-machine').innerHTML = safe('Machine', () => renderMachine(DATA.machine, m), 'Nothing to show.');
+      if (tab === 'diagnostics') $('view-diagnostics').innerHTML = safe('Diagnostics', () => renderDiagnostics(m, DATA.machine), 'Nothing to show.');
+    } catch (err) {
+      console.error('view', err);
+    }
   }
 
   function reset(message) {
@@ -464,7 +783,12 @@ const UI = (() => {
     tab = 'timeline'; filter = 'all'; search = '';
     $('search').value = '';
     $('empty').style.display = 'none';
-    render();
+    // Open on the last week: a month of events is unreadable, and the presets
+    // make widening it one click.
+    const last = DATA.model.last ? dayOf(DATA.model.last) : null;
+    range = last ? { from: addDays(last, -6), to: last } : { from: '', to: '' };
+    shiftSel = new Set();
+    rebuild();
   }
 
   async function loadFile(file) {

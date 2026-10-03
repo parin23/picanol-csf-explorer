@@ -6,6 +6,10 @@ binary-format inspector.
 
 Everything runs in the browser. No backend, no build step, no server.
 
+Dates are shown the Indian way — **DD/MM/YYYY** on a 24-hour clock — everywhere:
+cards, tables, charts, chart tooltips and the CSV export. Timestamps are kept ISO
+internally so sorting and date maths stay reliable; only the presentation changes.
+
 ## Use it
 
 Open `index.html`, or publish the folder as-is on GitHub Pages. Drop a `.zip`
@@ -14,11 +18,17 @@ CSF onto the page (or click to browse).
 | Tab | What you get |
 | --- | --- |
 | **Timeline** | every decoded event grouped by day, with category filters, search and CSV export |
-| **Production** | efficiency KPIs, efficiency-by-hour chart, downtime by reason, **stops per weft feeder**, **design density sets**, per-day / shift / article / operator tables — all sortable |
+| **Production** | date-range filter, efficiency KPIs, stop statistics (MTTR/MTBF/histogram), downtime Pareto, stops-by-hour and by-weekday, run/stop Gantt, output per hour, **stops per weft feeder** with a feeder×reason matrix, **shift comparison**, warp-stop breakdown, **design density sets**, article ranking — all sortable and collapsible |
 | **Machine** | serial, software versions, kernel health, memory trace, the 148-item settings dictionary, shift regimes, spare parts |
 | **Diagnostics** | which binary history formats are decoded, which are not, and why |
 
 Keyboard: `1`–`4` switch tabs, `/` focuses search, `t` toggles the theme.
+
+### Filtering
+
+The Production tab opens on the **last 7 days** — a quarter of production is unreadable at a glance, and the presets widen it in one click. You get two date inputs, *Whole range* / *7 / 30 / 90 days* presets, and a shift selector.
+
+Shifts are **multi-select**: pick A, B or both, and every KPI, chart and table recomputes for that shift only. Changing the date range keeps your shift selection, and *Reset* returns both to their defaults. Every panel is computed from the filtered event stream, so the numbers always describe one window. Rebuilding takes ~60 ms for a three-month CSF.
 
 ## What a CSF contains
 
@@ -75,6 +85,18 @@ could not be proven (`history/hour`, `fillingstop`, `temperature`, `drives`,
 `insertionlog`, `message`, `useractions`), it is listed as undecoded rather than
 guessed at.
 
+## Resilience
+
+A CSF is a support archive — parts of it are routinely missing, truncated or
+written by an older software version. The loader treats every part as optional:
+
+- each decoder runs inside its own guard, so a corrupt file costs only that file
+- whatever failed is listed in a **Partly decoded** panel rather than swallowed
+- the model drops malformed events instead of aborting, and panels render an
+  inline error instead of blanking the view
+- no arithmetic assumes a shape: `NaN` and `Invalid Date` cannot reach the screen
+- large archives are handled without blowing the stack or freezing the tab
+
 ## Layout
 
 ```
@@ -92,7 +114,10 @@ from it, so adding a decoder enriches every view at once.
 
 ## Checking it
 
-Open `selftest.html` — 51 assertions covering the export parser, the log parser
+Open `selftest.html` — 98 assertions covering the export parser, the log parser
 (including pick-variation grouping of 36 and 82 picks/inch), the binary framing
 and endianness, design index tables, kernel and memory parsing, production
-arithmetic, and robustness against junk input.
+arithmetic, the date-range and shift filters, every analytics aggregate
+(histogram, Pareto, heatmap, feeder matrix, shift totals), and resilience —
+every decoder against junk input, the model against malformed events and a
+200,000-event archive.

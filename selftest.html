@@ -148,24 +148,139 @@ check('model: hourly buckets produced', fed.hourly.length === 1, fed.hourly.leng
 check('model: hourly efficiency between 0 and 1', fed.hourly[0].efficiency > 0 && fed.hourly[0].efficiency < 1, fed.hourly[0].efficiency);
 check('model: design density set decoded', fed.designs.length === 1 && fed.designs[0].densities.join(',') === '36,82', JSON.stringify(fed.designs));
 
-// ── robustness: junk input must never throw ──
-for (const junk of [null, undefined, '', 'not xml', '<data/>', '<data type="stop"/>']) {
+// ── resilience: nothing here may throw, whatever it is handed ──
+for (const junk of [null, undefined, '', 'not xml', '<data/>', '<data type="stop"/>', 42, {}, []]) {
   let threw = null;
   try {
     const out = [];
     Decode.exportXml(junk, out);
     Decode.textLog(junk, out, 'x');
     Decode.kernelLog(junk, 'x');
+    Decode.memoryTrace(junk);
     Decode.machineDesc(junk); Decode.terminalDesc(junk); Decode.spareParts(junk); Decode.shiftRegimes(junk);
-    Decode.patternDesign(junk ? new TextEncoder().encode(junk) : junk);
-    Decode.btfRecords(junk ? new Uint8Array(8) : junk);
+    Decode.manifest(junk);
+    Decode.patternDesign(junk === null || junk === undefined ? junk : new TextEncoder().encode(String(junk)));
+    Decode.btfRecords(ArrayBuffer.isView(junk) ? junk : new Uint8Array(8));
+    Decode.btfStartstopRaw([junk].filter(x => x && x.length));
+    Decode.btfToEvents([], 0, 0);
   } catch (e) { threw = e.message; }
   check('junk input handled: ' + JSON.stringify(junk), !threw, threw);
 }
-const empty = Model.build([], []);
-check('model: empty input produces a usable model', empty.events.length === 0 && empty.picks === 0 && empty.feeders.length === 0, JSON.stringify(empty.events));
-check('model: efficiency is 0 not NaN when idle', empty.efficiency === 0, empty.efficiency);
-check('model: hourly empty, feeders empty, designs empty', !empty.hourly.length && !empty.designs.length, '');
+const junkEvents = [null, undefined, 42, 'x', {}, {t:'not-a-date'}, {t:'2026-09-29T08:00:00'},
+  {t:'2026-09-29T08:00:00', kind:'stop'}, {t:'2026-09-29T08:00:00', kind:'pick', values:null},
+  {t:'2026-09-29T08:00:00', kind:'yarn', channels:null}, {t:'2026-09-29T08:00:00', kind:'article', title:null}];
+let junkThrew = null, junkModel = null;
+try { junkModel = Model.build(junkEvents, [null, {}, {design:'d'}, {design:'d', tables:[null]}], { shifts: ['A'], from: 'x', to: 'y' }); }
+catch (e) { junkThrew = e.message; }
+check('model: junk events and designs never throw', !junkThrew, junkThrew);
+check('model: junk run still returns a complete shape',
+  !!(junkModel && Array.isArray(junkModel.events) && junkModel.byReason && junkModel.feeders &&
+     junkModel.hourly && junkModel.stats && junkModel.shiftTotals && junkModel.gantt && junkModel.designs), '');
+
+// A very large archive must not blow the stack or the clock.
+let bigThrew = null, bigModel = null;
+try {
+  const big = [];
+  for (let i = 0; i < 200000; i++) big.push({ t: `2026-09-29T${String(i % 24).padStart(2,'0')}:${String(i % 60).padStart(2,'0')}:${String(i % 60).padStart(2,'0')}`,
+    kind: i % 2 ? 'stop' : 'start', picks: i, length: i / 10, shift: 'A', src: 'export', mssg: 60918, label: 'X', channel: '8' });
+  bigModel = Model.build(big, []);
+} catch (e) { bigThrew = e.message; }
+check('model: 200k events build without overflowing', !bigThrew && !!(bigModel && bigModel.stopCount > 0), bigThrew);
+check('model: a fragmented day is capped, not exploded',
+  !!(bigModel && bigModel.gantt[0].segs.length <= 400), bigModel && bigModel.gantt[0].segs.length);
+
+// ── range-aware model and the analytics built on it ──
+// A consistent archive: the lifetime counter advances by exactly what each run
+// weaves, so additive totals and counter totals must agree.
+const day = n => `2026-09-${String(n).padStart(2, '0')}`;
+const base = [];
+let cum = 0;
+for (let d = 10; d <= 20; d++) {
+  const a = 10 * d, b = 2 * d;
+  base.push({ t: `${day(d)}T08:00:00`, kind: 'start', picks: cum, length: cum / 100, shift: 'A', src: 'export' });
+  base.push({ t: `${day(d)}T09:00:00`, kind: 'stop', picks: cum + a, length: (cum + a) / 100, shift: 'A', sincePicks: a, mssg: 60918, channel: '8', label: 'FD left gripper', src: 'export' });
+  base.push({ t: `${day(d)}T10:00:00`, kind: 'start', picks: cum + a, length: (cum + a) / 100, shift: 'B', src: 'export' });
+  base.push({ t: `${day(d)}T12:00:00`, kind: 'stop', picks: cum + a + b, length: (cum + a + b) / 100, shift: 'B', sincePicks: b, mssg: 50207, label: 'Manual stop', src: 'export' });
+  cum += a + b;
+}
+const full = Model.build(base, []);
+check('range: full span keeps every stop', full.stopCount === 22, full.stopCount);
+check('range: heatmap cells total the stops', full.hourMatrix.hours.reduce((s, h) => s + h.stops, 0) === full.stopCount,
+  full.hourMatrix.hours.reduce((s, h) => s + h.stops, 0));
+check('range: feeder matrix has the same reason list as the heatmap',
+  full.feederMatrix.reasons.join(',') === full.hourMatrix.reasons.join(','),
+  full.feederMatrix.reasons.join(',') + ' vs ' + full.hourMatrix.reasons.join(','));
+const fmCells = full.feederMatrix.channels.reduce((s, ch) =>
+  s + full.feederMatrix.reasons.reduce((x, r) => x + full.feederMatrix.cell(ch, r), 0), 0);
+check('range: feeder matrix totals the channel stops', fmCells === 11, fmCells);
+check('range: histogram totals the stops', full.histogram.reduce((s, h) => s + h.count, 0) === full.stopCount,
+  full.histogram.reduce((s, h) => s + h.count, 0));
+check('range: pareto cumulative ends at 100%', Math.abs(full.byReason[full.byReason.length - 1].cumulative - 1) < 1e-9,
+  full.byReason[full.byReason.length - 1].cumulative);
+check('range: pareto is sorted by downtime', full.byReason.every((r, i) => i === 0 || full.byReason[i - 1].sec >= r.sec), '');
+check('range: MTTR equals the mean of the stop durations', Math.abs(full.stats.mttr - 34527.272727272727) < 1e-6, full.stats.mttr);
+check('range: longest stop is the overnight gap', Math.abs(full.stats.longestStop.sec - 72000) < 1e-6, full.stats.longestStop.sec);
+check('range: histogram buckets long stops together', full.histogram[5].count === 21, full.histogram[5].count);
+check('range: the unclosed final stop lands in the first bucket', full.histogram[0].count === 1, full.histogram[0].count);
+check('range: MTBF is running time over stop gaps', full.stats.mtbf > 0 && full.stats.mtbr === undefined, full.stats.mtbf);
+check('range: weekday buckets cover seven days', full.weekday.length === 7, full.weekday.length);
+check('range: feeder matrix totals channel stops', full.feeders.reduce((s, f) => s + f.stops, 0) === 11, full.feeders.reduce((s, f) => s + f.stops, 0));
+check('range: warp panel counts beam stops', full.warp.beam === 0 && full.warp.other === 0, JSON.stringify(full.warp));
+check('range: gantt has one row per active day', full.gantt.length === 11, full.gantt.length);
+check('range: shift totals split picks without double counting',
+  full.shiftTotals.reduce((a, s) => a + s.picks, 0) === full.days.reduce((a, d) => a + d.picks, 0),
+  full.shiftTotals.reduce((a, s) => a + s.picks, 0) + ' vs ' + full.days.reduce((a, d) => a + d.picks, 0));
+check('range: additive totals match the lifetime counter', full.picks === full.days.reduce((a, d) => a + d.picks, 0),
+  full.picks + ' vs ' + full.days.reduce((a, d) => a + d.picks, 0));
+
+const part = Model.build(base, [], { from: day(12), to: day(14) });
+check('range: filtering narrows the stop count', part.stopCount === 6, part.stopCount);
+check('range: filtering narrows the days', part.days.length === 3, part.days.length);
+check('range: boundaries are inclusive', part.first.startsWith(day(12)) && part.last.startsWith(day(14)),
+  part.first + ' .. ' + part.last);
+check('range: an empty range is survivable', Model.build(base, [], { from: day(1), to: day(2) }).stopCount === 0, '');
+
+// ── shift filtering ──
+const onlyA = Model.build(base, [], { shifts: ['A'] });
+const onlyB = Model.build(base, [], { shifts: ['B'] });
+check('shifts: filtering to one shift drops the other', onlyA.stopCount === 11 && onlyB.stopCount === 11,
+  onlyA.stopCount + '/' + onlyB.stopCount);
+check('shifts: unfiltered run keeps both shifts', Model.build(base, [], { shifts: [] }).stopCount === 22, '');
+check('shifts: filtering preserves the shift attribution',
+  onlyA.shiftTotals.length === 1 && onlyA.shiftTotals[0].name === 'A' &&
+  onlyA.shiftTotals[0].picks === full.shiftTotals.find(s => s.name === 'A').picks,
+  onlyA.shiftTotals[0] && onlyA.shiftTotals[0].picks + ' vs ' + (full.shiftTotals.find(s => s.name === 'A') || {}).picks);
+check('shifts: the two shifts together account for every pick',
+  full.shiftTotals.reduce((a, s) => a + s.picks, 0) === full.picks,
+  full.shiftTotals.reduce((a, s) => a + s.picks, 0) + ' vs ' + full.picks);
+check('shifts: every surviving event belongs to the chosen shift',
+  onlyA.events.every(e => e.shift === 'A'), '');
+check('shifts: the two shifts are disjoint', onlyA.picks === 0 || onlyB.picks === 0 || onlyA.picks !== onlyB.picks, '');
+const both = Model.build(base, [], { shifts: ['A', 'B'] });
+check('shifts: selecting both matches no filter', both.stopCount === full.stopCount, both.stopCount);
+
+// ── Indian date format: DD/MM/YYYY on a 24-hour clock ──
+const sample = '2026-09-29T16:22:11';
+check('date: DD/MM/YYYY', Decode.fmtDate(sample) === '29/09/2026', Decode.fmtDate(sample));
+check('time: 24-hour with seconds', Decode.fmtTime(sample) === '16:22:11', Decode.fmtTime(sample));
+check('datetime: date and clock', Decode.fmtDateTime(sample) === '29/09/2026 16:22', Decode.fmtDateTime(sample));
+check('day short: DD/MM', Decode.fmtDayShort('2026-01-05') === '05/01', Decode.fmtDayShort('2026-01-05'));
+check('day full: DD/MM/YYYY', Decode.fmtDayFull('2026-01-05') === '05/01/2026', Decode.fmtDayFull('2026-01-05'));
+check('day label: weekday then DD/MM/YYYY', Decode.fmtDayLabel('2026-09-29') === 'Tuesday, 29/09/2026', Decode.fmtDayLabel('2026-09-29'));
+check('format: single-digit days and months are padded', Decode.fmtDate('2026-01-05T00:00:00') === '05/01/2026', Decode.fmtDate('2026-01-05T00:00:00'));
+check('format: midnight shows 24-hour zero', Decode.fmtClock('2026-01-05T00:07:00') === '00:07', Decode.fmtClock('2026-01-05T00:07:00'));
+check('format: afternoon hours are not 12-hour', Decode.fmtClock('2026-01-05T16:07:00') === '16:07', Decode.fmtClock('2026-01-05T16:07:00'));
+check('format: invalid input degrades quietly', Decode.fmtDate('nonsense') === '—' && Decode.fmtDayFull('nonsense') === 'nonsense',
+  Decode.fmtDate('nonsense') + '/' + Decode.fmtDayFull('nonsense'));
+const isoOut = [];
+Decode.exportXml('<data date="2026/09/29" time="16:22:11" absolute_picks="5" type="stop" mssg_nr="50967"/>', isoOut);
+check('format: internals stay ISO so sorting still works', isoOut[0].t === '2026-09-29T16:22:11' && Decode.fmtDateTime(isoOut[0].t) === '29/09/2026 16:22',
+  isoOut[0] && isoOut[0].t);
+// A DD/MM string must never be mistaken for a US M/D/Y reading of the same digits.
+check('format: day comes before month, always', Decode.fmtDate('2026-09-29') === '29/09/2026' && Decode.fmtDate('2026-03-29') === '29/03/2026',
+  Decode.fmtDate('2026-09-29') + ' / ' + Decode.fmtDate('2026-03-29'));
+check('format: single-digit days are zero-padded', Decode.fmtDate('2026-09-01') === '01/09/2026', Decode.fmtDate('2026-09-01'));
+check('format: export XML dates convert too', Decode.fmtDateTime(isoOut[0].t).slice(0, 10) === '29/09/2026', Decode.fmtDateTime(isoOut[0].t));
 
 out.innerHTML += `\n<span class="${failed ? 'fail' : 'pass'}">${failed ? failed + ' FAILED' : 'ALL PASSED'}</span>\n`;
 </script>

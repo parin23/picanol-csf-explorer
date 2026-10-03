@@ -262,7 +262,7 @@ function terminalDesc(xml) {
 }
 
 function manifest(json) {
-  const sw = json.tbb2 || {};
+  const sw = (json && typeof json === 'object' && json.tbb2) || {};
   return { software: sw.software || '', machine: sw.machine || '', commit: (sw.commit || '').slice(0, 10),
     buildDate: sw.date || '', job: sw.job || '' };
 }
@@ -368,13 +368,19 @@ function memoryTrace(text) {
     series.push({ free: r[pick], total: r[total], used: 100 * (1 - (r[avail] || r[pick]) / r[total]) });
   }
   if (!series.length) return null;
-  const used = series.map(s => s.used);
+  // Reduced by hand — Math.max(...series) overflows the stack on long traces.
+  let sum = 0, maxUsed = -Infinity, minFree = Infinity;
+  for (const s of series) {
+    sum += s.used;
+    if (s.used > maxUsed) maxUsed = s.used;
+    if (s.free < minFree) minFree = s.free;
+  }
   return {
     samples: series.length,
     columns: head.length,
-    avgUsed: used.reduce((a, b) => a + b, 0) / used.length,
-    maxUsed: Math.max(...used),
-    minFreeMB: Math.min(...series.map(s => s.free)) / 1024,
+    avgUsed: sum / series.length,
+    maxUsed,
+    minFreeMB: minFree / 1024,
   };
 }
 
@@ -469,10 +475,29 @@ function btfToEvents(raw, knownMin, knownMax) {
   return { events, solved: events.length > 0, coverage: best.inside / raw.length };
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  Formatting — Indian date convention: DD/MM/YYYY on a 24-hour clock.
+//  Timestamps stay ISO internally so sorting and date maths stay reliable;
+//  only the presentation changes.
+// ═══════════════════════════════════════════════════════════════════════════
+const pad2 = n => String(n).padStart(2, '0');
+const isoDate = v => /^(\d{4})-(\d{2})-(\d{2})/.exec(String(v || ''));
+const fmtTime = t => { const d = new Date(t); return isNaN(d) ? '--:--:--' : `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`; };
+const fmtDate = t => { const d = new Date(t); return isNaN(d) ? '—' : `${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}/${d.getFullYear()}`; };
+const fmtClock = t => { const d = new Date(t); return isNaN(d) ? '—' : `${pad2(d.getHours())}:${pad2(d.getMinutes())}`; };
+const fmtDateTime = t => { const d = new Date(t); return isNaN(d) ? '—' : `${fmtDate(t)} ${fmtClock(t)}`; };
+const fmtDayShort = v => { const m = isoDate(v); return m ? `${m[3]}/${m[2]}` : String(v || ''); };
+const fmtDayFull = v => { const m = isoDate(v); return m ? `${m[3]}/${m[2]}/${m[1]}` : String(v || ''); };
+const fmtDayLabel = d => {
+  const x = new Date(d + 'T00:00:00');
+  return isNaN(x) ? String(d) : `${x.toLocaleDateString('en-GB', { weekday: 'long' })}, ${fmtDayFull(d)}`;
+};
+
 // Everything the rest of the app reaches for, in one place.
 const Decode = {
   YARN_COLORS, STOP_REASONS, SETTING_RULES, MM_PER_INCH, DENSITY_GROUP_MS, BTF,
   exportXml, textLog, machineDesc, terminalDesc, manifest, spareParts, shiftRegimes,
   btfRecords, btfStartstopRaw, btfToEvents,
   patternDesign, manualActions, kernelLog, memoryTrace,
+  fmtTime, fmtDate, fmtClock, fmtDateTime, fmtDayShort, fmtDayFull, fmtDayLabel,
 };
